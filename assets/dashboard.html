@@ -275,10 +275,12 @@
       return chart;
     }
 
-    function drawLine(canvasId, values, color, labels, valueFormatter) {
+    function drawLine(canvasId, values, color, labels, valueFormatter, yMin = null, yMax = null) {
       const chart = ensureLineChart(canvasId, color);
       chart.data.labels = labels;
       chart.data.datasets[0].data = values;
+      chart.options.scales.y.min = yMin;
+      chart.options.scales.y.max = yMax;
       chart.options.plugins.tooltip.callbacks = {
         title: (items) => {
           const idx = items?.[0]?.dataIndex ?? 0;
@@ -302,8 +304,8 @@
       const diskSeries = buildWindowSeries(points, (p) => Number(p.disk_io_bytes || 0) / 4096);
       const netSeries = buildWindowSeries(points, (p) => (Number(p.network_total_bytes || 0) * 8) / 1_000_000);
 
-      drawLine('cpuTrend', cpuSeries.values, '#54c7ff', cpuSeries.labels, (v) => `${Number(v).toFixed(1)}%`);
-      drawLine('memTrend', memSeries.values, '#7b61ff', memSeries.labels, (v) => `${Number(v).toFixed(1)}%`);
+      drawLine('cpuTrend', cpuSeries.values, '#54c7ff', cpuSeries.labels, (v) => `${Number(v).toFixed(1)}%`, 0, 100);
+      drawLine('memTrend', memSeries.values, '#7b61ff', memSeries.labels, (v) => `${Number(v).toFixed(1)}%`, 0, 100);
       drawLine('diskTrend', diskSeries.values, '#30d188', diskSeries.labels, (v) => `${Number(v).toFixed(0)} IOPS`);
       drawLine('netTrend', netSeries.values, '#f5b740', netSeries.labels, (v) => `${Number(v).toFixed(2)} Mbps`);
 
@@ -351,8 +353,8 @@
       });
       const ioSeries = buildWindowSeries(points, (p) => p.network_total_bytes + p.disk_io_total_bytes);
 
-      drawLine('containerCpuTrend', cpuSeries.values, '#54c7ff', cpuSeries.labels, (v) => `${Number(v).toFixed(1)}%`);
-      drawLine('containerMemTrend', memSeries.values, '#7b61ff', memSeries.labels, (v) => `${Number(v).toFixed(1)}%`);
+      drawLine('containerCpuTrend', cpuSeries.values, '#54c7ff', cpuSeries.labels, (v) => `${Number(v).toFixed(1)}%`, 0, 100);
+      drawLine('containerMemTrend', memSeries.values, '#7b61ff', memSeries.labels, (v) => `${Number(v).toFixed(1)}%`, 0, 100);
       drawLine('containerIoTrend', ioSeries.values, '#f5b740', ioSeries.labels, (v) => `${fmtBytes(Number(v))}`);
     }
 

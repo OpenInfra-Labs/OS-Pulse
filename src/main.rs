@@ -425,17 +425,17 @@ async fn api_trends(
         let samples: i64 = row.get(8)?;
         let c = samples.max(1) as f64;
         let (rx_sum, tx_sum) = if network_rx_sum == 0.0 && network_tx_sum == 0.0 {
-            (network_sum, 0.0)
+            estimate_network_split(&state, network_sum as u64)
         } else {
-            (network_rx_sum, network_tx_sum)
+            (network_rx_sum as u64, network_tx_sum as u64)
         };
         Ok(TrendPoint {
             ts: bucket_end_ms / 1000,
             cpu_percent: (cpu_sum / c) as f32,
             memory_percent: (memory_sum / c) as f32,
             disk_iops: disk_iops_sum / c,
-            network_rx_bytes: rx_sum as u64,
-            network_tx_bytes: tx_sum as u64,
+            network_rx_bytes: rx_sum,
+            network_tx_bytes: tx_sum,
             container_count: (container_sum / c).round() as usize,
         })
     }) {
@@ -872,9 +872,10 @@ fn persist_snapshot(state: &AppState, snapshot: &MetricsResponse) {
     let _ = db.execute(
         "
         INSERT INTO system_metrics_history(
-            ts, cpu_percent, memory_percent, disk_percent, disk_iops, network_total_bytes,
+            ts, cpu_percent, memory_percent, disk_percent, disk_iops,
+            network_total_bytes, network_rx_bytes, network_tx_bytes,
             process_count, load_1, load_5, load_15, container_count
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
         ",
         params![
             snapshot.ts,
@@ -883,6 +884,8 @@ fn persist_snapshot(state: &AppState, snapshot: &MetricsResponse) {
             snapshot.system.disk_percent,
             snapshot.system.disk_iops,
             snapshot.system.network_rx_bytes + snapshot.system.network_tx_bytes,
+            snapshot.system.network_rx_bytes as i64,
+            snapshot.system.network_tx_bytes as i64,
             snapshot.system.process_count as i64,
             snapshot.system.load_1,
             snapshot.system.load_5,
@@ -919,6 +922,21 @@ fn persist_snapshot(state: &AppState, snapshot: &MetricsResponse) {
             ],
         );
     }
+}
+
+fn estimate_network_split(state: &AppState, total: u64) -> (u64, u64) {
+    if let Some(latest) = state.latest.lock().expect("latest lock").clone() {
+        let rx = latest.system.network_rx_bytes;
+        let tx = latest.system.network_tx_bytes;
+        let sum = rx.saturating_add(tx);
+        if sum > 0 {
+            let rx_ratio = rx as f64 / sum as f64;
+            let rx_est = (total as f64 * rx_ratio).round() as u64;
+            let tx_est = total.saturating_sub(rx_est);
+            return (rx_est, tx_est);
+        }
+    }
+    (total, 0)
 }
 
 fn update_system_aggregates(db: &Connection, snapshot: &MetricsResponse) {
@@ -1263,6 +1281,8 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             disk_percent REAL NOT NULL,
             disk_iops REAL NOT NULL DEFAULT 0,
             network_total_bytes INTEGER NOT NULL,
+            network_rx_bytes INTEGER NOT NULL DEFAULT 0,
+            network_tx_bytes INTEGER NOT NULL DEFAULT 0,
             process_count INTEGER NOT NULL,
             load_1 REAL NOT NULL,
             load_5 REAL NOT NULL,
@@ -1324,6 +1344,14 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     );
     let _ = conn.execute(
         "ALTER TABLE system_metrics_agg ADD COLUMN network_tx_sum REAL NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE system_metrics_history ADD COLUMN network_rx_bytes INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE system_metrics_history ADD COLUMN network_tx_bytes INTEGER NOT NULL DEFAULT 0",
         [],
     );
     Ok(())

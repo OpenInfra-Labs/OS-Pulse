@@ -5,6 +5,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use bollard::container::{InspectContainerOptions, ListContainersOptions, StatsOptions};
+use bollard::container::MemoryStatsStats;
 use bollard::Docker;
 use futures_util::StreamExt;
 use sysinfo::{CpuExt, DiskExt, NetworkExt, ProcessExt, System, SystemExt};
@@ -353,8 +354,17 @@ pub(crate) async fn collect_container_metrics() -> Vec<ContainerMetrics> {
         let mut disk_write_bytes = 0_u64;
 
         if let Some(Ok(stats)) = stream.next().await {
-            memory_used_bytes = stats.memory_stats.usage.unwrap_or(0);
+            let raw_usage = stats.memory_stats.usage.unwrap_or(0);
             memory_limit_bytes = stats.memory_stats.limit.unwrap_or(0);
+
+            // Subtract filesystem cache to get actual working set memory,
+            // matching what `docker stats` reports.
+            let cache = match stats.memory_stats.stats {
+                Some(MemoryStatsStats::V1(v1)) => v1.total_inactive_file,
+                Some(MemoryStatsStats::V2(v2)) => v2.inactive_file,
+                None => 0,
+            };
+            memory_used_bytes = raw_usage.saturating_sub(cache);
 
             let cpu_total = stats.cpu_stats.cpu_usage.total_usage as f64;
             let pre_cpu_total = stats.precpu_stats.cpu_usage.total_usage as f64;

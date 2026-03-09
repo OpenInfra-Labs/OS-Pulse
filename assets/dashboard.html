@@ -148,7 +148,9 @@
       const nowSec = Math.floor(Date.now() / 1000);
       const spanSec = selectedMinutes * 60;
       const bucketSec = Math.max(1, Math.floor(spanSec / FIXED_TREND_POINTS));
-      const startSec = nowSec - spanSec;
+      const startSec = (points && points.length > 0)
+        ? Number(points[0].ts || (nowSec - spanSec))
+        : (nowSec - spanSec);
 
       const labels = Array.from({ length: FIXED_TREND_POINTS }, (_, idx) => {
         const ts = startSec + idx * bucketSec;

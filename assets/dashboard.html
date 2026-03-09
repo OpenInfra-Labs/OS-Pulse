@@ -396,7 +396,7 @@
       const points = data.points || [];
       const cpuSeries = buildWindowSeries(points, (p) => p.cpu_percent);
       const memSeries = buildWindowSeries(points, (p) => {
-        if (!p.memory_limit_bytes) return 0;
+        if (!p.memory_limit_bytes) return null;
         return (p.memory_used_bytes / p.memory_limit_bytes) * 100;
       });
       const ioSeries = buildWindowSeries(points, (p) => p.network_total_bytes + p.disk_io_total_bytes);

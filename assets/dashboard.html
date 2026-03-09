@@ -48,7 +48,7 @@
           <div class="chart-wrap"><canvas id="memTrend"></canvas></div>
         </article>
         <article class="trend-card">
-          <h4>Disk I/O MB/s</h4>
+          <h4>Disk IOPS</h4>
           <div class="chart-wrap"><canvas id="diskTrend"></canvas></div>
         </article>
         <article class="trend-card">
@@ -246,7 +246,7 @@
       const labels = points.map(p => fmtTime(p.ts));
       drawLine('cpuTrend', points.map(p => p.cpu_percent), '#54c7ff', labels, (v) => `${Number(v).toFixed(1)}%`);
       drawLine('memTrend', points.map(p => p.memory_percent), '#7b61ff', labels, (v) => `${Number(v).toFixed(1)}%`);
-      drawLine('diskTrend', points.map(p => Number(p.disk_io_bytes || 0) / 1_000_000), '#30d188', labels, (v) => `${Number(v).toFixed(2)} MB/s`);
+      drawLine('diskTrend', points.map(p => Number(p.disk_io_bytes || 0) / 4096), '#30d188', labels, (v) => `${Number(v).toFixed(0)} IOPS`);
       drawLine('netTrend', points.map(p => (Number(p.network_total_bytes || 0) * 8) / 1_000_000), '#f5b740', labels, (v) => `${Number(v).toFixed(2)} Mbps`);
 
       const sampled = data.sampled ? ' · sampled to 96' : '';

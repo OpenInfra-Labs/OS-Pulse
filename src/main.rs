@@ -1,0 +1,846 @@
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use argon2::{
+    Argon2,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+};
+use axum::{
+    Json, Router,
+    body::Body,
+    extract::{Query, Request, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Redirect, Response},
+    routing::{get, post},
+};
+use bollard::{
+    container::{InspectContainerOptions, ListContainersOptions, StatsOptions},
+    Docker,
+};
+use futures_util::StreamExt;
+use rand_core::OsRng;
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
+use sysinfo::{CpuExt, DiskExt, NetworkExt, System, SystemExt};
+use uuid::Uuid;
+
+const TOKEN_LIFETIME_SECS: i64 = 3 * 24 * 60 * 60;
+const AUTH_COOKIE_NAME: &str = "osp_token";
+
+#[derive(Clone)]
+struct AppState {
+    db: Arc<Mutex<Connection>>,
+    latest: Arc<Mutex<Option<MetricsResponse>>>,
+    sample_interval_secs: u64,
+}
+
+#[derive(Clone)]
+struct AuthSession {
+    user_id: i64,
+    username: String,
+}
+
+#[derive(Deserialize)]
+struct AuthPayload {
+    username: String,
+    password: String,
+}
+
+#[derive(Serialize)]
+struct AuthStateResponse {
+    needs_setup: bool,
+    logged_in: bool,
+}
+
+#[derive(Serialize)]
+struct MeResponse {
+    user_id: i64,
+    username: String,
+}
+
+#[derive(Serialize, Clone)]
+struct SystemMetrics {
+    cpu_percent: f32,
+    memory_total_bytes: u64,
+    memory_used_bytes: u64,
+    memory_percent: f32,
+    disk_total_bytes: u64,
+    disk_used_bytes: u64,
+    disk_percent: f32,
+    network_rx_bytes: u64,
+    network_tx_bytes: u64,
+    process_count: usize,
+    load_1: f64,
+    load_5: f64,
+    load_15: f64,
+}
+
+#[derive(Serialize, Clone)]
+struct ContainerMetrics {
+    name: String,
+    status: String,
+    cpu_percent: f64,
+    memory_used_bytes: u64,
+    memory_limit_bytes: u64,
+    network_rx_bytes: u64,
+    network_tx_bytes: u64,
+    disk_read_bytes: u64,
+    disk_write_bytes: u64,
+    image: String,
+    tag: String,
+    restart_count: i64,
+}
+
+#[derive(Serialize, Clone)]
+struct MetricsResponse {
+    system: SystemMetrics,
+    containers: Vec<ContainerMetrics>,
+    ts: i64,
+}
+
+#[derive(Deserialize)]
+struct TrendQuery {
+    minutes: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct TrendPoint {
+    ts: i64,
+    cpu_percent: f32,
+    memory_percent: f32,
+    disk_percent: f32,
+    network_total_bytes: u64,
+    container_count: usize,
+}
+
+#[derive(Serialize)]
+struct TrendResponse {
+    points: Vec<TrendPoint>,
+}
+
+#[tokio::main]
+async fn main() {
+    let connection = Connection::open("os_pulse.db").expect("open sqlite database");
+    init_db(&connection).expect("init database");
+
+    let sample_interval_secs = std::env::var("OSP_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(1);
+
+    let state = AppState {
+        db: Arc::new(Mutex::new(connection)),
+        latest: Arc::new(Mutex::new(None)),
+        sample_interval_secs,
+    };
+
+    tokio::spawn(background_sampler(state.clone()));
+
+    let protected = Router::new()
+        .route("/dashboard", get(dashboard_page))
+        .route("/api/me", get(api_me))
+        .route("/api/metrics", get(api_metrics))
+        .route("/api/trends", get(api_trends))
+        .route("/api/action", post(api_action))
+        .route("/api/auth/logout", post(api_logout))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
+
+    let app = Router::new()
+        .route("/", get(root_redirect))
+        .route("/login", get(login_page))
+        .route("/styles.css", get(styles_css))
+        .route("/api/auth/state", get(api_auth_state))
+        .route("/api/auth/setup", post(api_auth_setup))
+        .route("/api/auth/login", post(api_auth_login))
+        .merge(protected)
+        .with_state(state);
+
+    let addr: SocketAddr = "0.0.0.0:3000".parse().expect("valid socket address");
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("bind listener");
+    println!("OS-Pulse running at http://{}", addr);
+    axum::serve(listener, app).await.expect("start server");
+}
+
+async fn root_redirect(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let user = resolve_session_from_headers(&state, &headers);
+    if user.is_some() {
+        Redirect::to("/dashboard").into_response()
+    } else {
+        Redirect::to("/login").into_response()
+    }
+}
+
+async fn login_page() -> impl IntoResponse {
+    Html(include_str!("../assets/login.html"))
+}
+
+async fn dashboard_page() -> impl IntoResponse {
+    Html(include_str!("../assets/dashboard.html"))
+}
+
+async fn styles_css() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../assets/styles.css"),
+    )
+}
+
+async fn api_auth_state(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let needs_setup = state_needs_setup(&state);
+    let logged_in = resolve_session_from_headers(&state, &headers).is_some();
+    Json(AuthStateResponse {
+        needs_setup,
+        logged_in,
+    })
+}
+
+async fn api_auth_setup(
+    State(state): State<AppState>,
+    Json(payload): Json<AuthPayload>,
+) -> impl IntoResponse {
+    if payload.username.trim().is_empty() || payload.password.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "Username and password are required");
+    }
+    if !state_needs_setup(&state) {
+        return json_error(StatusCode::CONFLICT, "Account already initialized");
+    }
+
+    let password_hash = match hash_password(&payload.password) {
+        Ok(v) => v,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Hashing failed"),
+    };
+
+    let user_id = {
+        let db = state.db.lock().expect("db lock");
+        let inserted = db.execute(
+            "INSERT INTO users(username, password_hash, created_at) VALUES (?1, ?2, ?3)",
+            params![payload.username.trim(), password_hash, now_ts()],
+        );
+        if inserted.is_err() {
+            return json_error(StatusCode::CONFLICT, "Username already exists");
+        }
+        db.last_insert_rowid()
+    };
+
+    let token = create_session_token(&state, user_id);
+    if let Some(token) = token {
+        return with_auth_cookie(Json(serde_json::json!({ "ok": true })), &token).into_response();
+    }
+    json_error(StatusCode::INTERNAL_SERVER_ERROR, "Unable to create session")
+}
+
+async fn api_auth_login(
+    State(state): State<AppState>,
+    Json(payload): Json<AuthPayload>,
+) -> impl IntoResponse {
+    if payload.username.trim().is_empty() || payload.password.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "Username and password are required");
+    }
+
+    let user = {
+        let db = state.db.lock().expect("db lock");
+        db.query_row(
+            "SELECT id, password_hash FROM users WHERE username = ?1",
+            params![payload.username.trim()],
+            |row| {
+                let id: i64 = row.get(0)?;
+                let hash: String = row.get(1)?;
+                Ok((id, hash))
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()
+    };
+
+    let Some((user_id, hash)) = user else {
+        return json_error(StatusCode::UNAUTHORIZED, "Invalid credentials");
+    };
+
+    if !verify_password(&payload.password, &hash) {
+        return json_error(StatusCode::UNAUTHORIZED, "Invalid credentials");
+    }
+
+    let token = create_session_token(&state, user_id);
+    if let Some(token) = token {
+        return with_auth_cookie(Json(serde_json::json!({ "ok": true })), &token).into_response();
+    }
+    json_error(StatusCode::INTERNAL_SERVER_ERROR, "Unable to create session")
+}
+
+async fn api_logout(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if let Some(token) = extract_cookie(&headers, AUTH_COOKIE_NAME) {
+        let db = state.db.lock().expect("db lock");
+        let _ = db.execute("DELETE FROM sessions WHERE token = ?1", params![token]);
+    }
+
+    let mut response = Json(serde_json::json!({ "ok": true })).into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear_auth_cookie()).expect("valid clear cookie"),
+    );
+    response
+}
+
+async fn api_me(
+    axum::extract::Extension(session): axum::extract::Extension<AuthSession>,
+) -> impl IntoResponse {
+    Json(MeResponse {
+        user_id: session.user_id,
+        username: session.username,
+    })
+}
+
+async fn api_action() -> impl IntoResponse {
+    Json(serde_json::json!({ "ok": true }))
+}
+
+async fn api_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    if let Some(latest) = state.latest.lock().expect("latest lock").clone() {
+        return Json(latest);
+    }
+
+    let snapshot = collect_metrics_snapshot().await;
+    persist_snapshot(&state, &snapshot);
+    *state.latest.lock().expect("latest lock") = Some(snapshot.clone());
+    Json(snapshot)
+}
+
+async fn api_trends(
+    State(state): State<AppState>,
+    Query(query): Query<TrendQuery>,
+) -> impl IntoResponse {
+    let minutes = query.minutes.unwrap_or(60).clamp(5, 7 * 24 * 60);
+    let from_ts = now_ts() - (minutes as i64 * 60);
+
+    let db = state.db.lock().expect("db lock");
+    let mut stmt = match db.prepare(
+        "
+        SELECT ts, cpu_percent, memory_percent, disk_percent, network_total_bytes, container_count
+        FROM system_metrics_history
+        WHERE ts >= ?1
+        ORDER BY ts ASC
+        ",
+    ) {
+        Ok(v) => v,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Query failed"),
+    };
+
+    let rows = match stmt.query_map(params![from_ts], |row| {
+        Ok(TrendPoint {
+            ts: row.get(0)?,
+            cpu_percent: row.get(1)?,
+            memory_percent: row.get(2)?,
+            disk_percent: row.get(3)?,
+            network_total_bytes: row.get(4)?,
+            container_count: row.get::<_, i64>(5)? as usize,
+        })
+    }) {
+        Ok(v) => v,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Query failed"),
+    };
+
+    let mut points = Vec::new();
+    for row in rows {
+        if let Ok(point) = row {
+            points.push(point);
+        }
+    }
+
+    Json(TrendResponse { points }).into_response()
+}
+
+async fn auth_middleware(
+    State(state): State<AppState>,
+    mut req: Request<Body>,
+    next: Next,
+) -> Response {
+    let token = extract_cookie(req.headers(), AUTH_COOKIE_NAME);
+    let Some(token) = token else {
+        return unauth_response(req.uri().path());
+    };
+
+    let session = validate_and_extend_session(&state, &token);
+    let Some(auth_session) = session else {
+        return unauth_response(req.uri().path());
+    };
+
+    req.extensions_mut().insert(auth_session);
+    let mut response = next.run(req).await;
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&build_auth_cookie(&token)).expect("valid set-cookie"),
+    );
+    response
+}
+
+fn unauth_response(path: &str) -> Response {
+    if path.starts_with("/api/") {
+        return json_error(StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+    Redirect::to("/login").into_response()
+}
+
+fn collect_system_metrics() -> SystemMetrics {
+    let mut system = System::new_all();
+    system.refresh_all();
+
+    let memory_total_bytes = system.total_memory() * 1024;
+    let memory_used_bytes = system.used_memory() * 1024;
+    let memory_percent = if memory_total_bytes == 0 {
+        0.0
+    } else {
+        (memory_used_bytes as f32 / memory_total_bytes as f32) * 100.0
+    };
+
+    let mut disk_total_bytes = 0_u64;
+    let mut disk_available_bytes = 0_u64;
+    for disk in system.disks() {
+        disk_total_bytes += disk.total_space();
+        disk_available_bytes += disk.available_space();
+    }
+    let disk_used_bytes = disk_total_bytes.saturating_sub(disk_available_bytes);
+    let disk_percent = if disk_total_bytes == 0 {
+        0.0
+    } else {
+        (disk_used_bytes as f32 / disk_total_bytes as f32) * 100.0
+    };
+
+    let mut network_rx_bytes = 0_u64;
+    let mut network_tx_bytes = 0_u64;
+    for (_, data) in system.networks() {
+        network_rx_bytes += data.received();
+        network_tx_bytes += data.transmitted();
+    }
+
+    let load = system.load_average();
+    SystemMetrics {
+        cpu_percent: system.global_cpu_info().cpu_usage(),
+        memory_total_bytes,
+        memory_used_bytes,
+        memory_percent,
+        disk_total_bytes,
+        disk_used_bytes,
+        disk_percent,
+        network_rx_bytes,
+        network_tx_bytes,
+        process_count: system.processes().len(),
+        load_1: load.one,
+        load_5: load.five,
+        load_15: load.fifteen,
+    }
+}
+
+async fn collect_metrics_snapshot() -> MetricsResponse {
+    let system = collect_system_metrics();
+    let containers = collect_container_metrics().await;
+    MetricsResponse {
+        system,
+        containers,
+        ts: now_ts(),
+    }
+}
+
+fn persist_snapshot(state: &AppState, snapshot: &MetricsResponse) {
+    let db = state.db.lock().expect("db lock");
+    let _ = db.execute(
+        "
+        INSERT INTO system_metrics_history(
+            ts, cpu_percent, memory_percent, disk_percent, network_total_bytes,
+            process_count, load_1, load_5, load_15, container_count
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        ",
+        params![
+            snapshot.ts,
+            snapshot.system.cpu_percent,
+            snapshot.system.memory_percent,
+            snapshot.system.disk_percent,
+            snapshot.system.network_rx_bytes + snapshot.system.network_tx_bytes,
+            snapshot.system.process_count as i64,
+            snapshot.system.load_1,
+            snapshot.system.load_5,
+            snapshot.system.load_15,
+            snapshot.containers.len() as i64,
+        ],
+    );
+
+    for container in &snapshot.containers {
+        let _ = db.execute(
+            "
+            INSERT INTO container_metrics_history(
+                ts, name, status, cpu_percent, memory_used_bytes, memory_limit_bytes,
+                network_rx_bytes, network_tx_bytes, disk_read_bytes, disk_write_bytes,
+                image, tag, restart_count
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ",
+            params![
+                snapshot.ts,
+                container.name,
+                container.status,
+                container.cpu_percent,
+                container.memory_used_bytes as i64,
+                container.memory_limit_bytes as i64,
+                container.network_rx_bytes as i64,
+                container.network_tx_bytes as i64,
+                container.disk_read_bytes as i64,
+                container.disk_write_bytes as i64,
+                container.image,
+                container.tag,
+                container.restart_count,
+            ],
+        );
+    }
+}
+
+async fn background_sampler(state: AppState) {
+    loop {
+        let snapshot = collect_metrics_snapshot().await;
+        persist_snapshot(&state, &snapshot);
+        *state.latest.lock().expect("latest lock") = Some(snapshot);
+
+        tokio::time::sleep(Duration::from_secs(state.sample_interval_secs)).await;
+    }
+}
+
+async fn collect_container_metrics() -> Vec<ContainerMetrics> {
+    let docker = match Docker::connect_with_local_defaults() {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+
+    let list_opts = ListContainersOptions::<String> {
+        all: true,
+        ..Default::default()
+    };
+    let containers = match docker.list_containers(Some(list_opts)).await {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut result = Vec::new();
+    for summary in containers {
+        let id = match summary.id {
+            Some(v) if !v.is_empty() => v,
+            _ => continue,
+        };
+
+        let name = summary
+            .names
+            .as_ref()
+            .and_then(|v| v.first())
+            .map(|s| s.trim_start_matches('/').to_string())
+            .unwrap_or_else(|| id.chars().take(12).collect());
+        let status = summary
+            .status
+            .clone()
+            .or(summary.state.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let image_full = summary.image.unwrap_or_else(|| "unknown".to_string());
+        let (image, tag) = split_image(&image_full);
+
+        let inspect_opts = InspectContainerOptions { size: false };
+        let restart_count = docker
+            .inspect_container(&id, Some(inspect_opts))
+            .await
+            .ok()
+            .and_then(|i| i.restart_count)
+            .unwrap_or(0);
+
+        let stats_opts = StatsOptions {
+            stream: false,
+            one_shot: true,
+        };
+        let mut stream = docker.stats(&id, Some(stats_opts));
+
+        let mut cpu_percent = 0.0_f64;
+        let mut memory_used_bytes = 0_u64;
+        let mut memory_limit_bytes = 0_u64;
+        let mut network_rx_bytes = 0_u64;
+        let mut network_tx_bytes = 0_u64;
+        let mut disk_read_bytes = 0_u64;
+        let mut disk_write_bytes = 0_u64;
+
+        if let Some(Ok(stats)) = stream.next().await {
+            memory_used_bytes = stats.memory_stats.usage.unwrap_or(0);
+            memory_limit_bytes = stats.memory_stats.limit.unwrap_or(0);
+
+            let cpu_total = stats
+                .cpu_stats
+                .cpu_usage
+                .total_usage as f64;
+            let pre_cpu_total = stats
+                .precpu_stats
+                .cpu_usage
+                .total_usage as f64;
+            let system_cpu = stats.cpu_stats.system_cpu_usage.unwrap_or_default() as f64;
+            let pre_system_cpu = stats.precpu_stats.system_cpu_usage.unwrap_or_default() as f64;
+            let cpu_delta = cpu_total - pre_cpu_total;
+            let system_delta = system_cpu - pre_system_cpu;
+
+            let online_cpus = stats
+                .cpu_stats
+                .online_cpus
+                .unwrap_or_else(|| {
+                    stats
+                        .cpu_stats
+                        .cpu_usage
+                        .percpu_usage
+                        .as_ref()
+                        .map(|v| v.len() as u64)
+                        .unwrap_or(1)
+                }) as f64;
+
+            if cpu_delta > 0.0 && system_delta > 0.0 {
+                cpu_percent = (cpu_delta / system_delta) * online_cpus * 100.0;
+            }
+
+            if let Some(networks) = stats.networks {
+                for (_, net) in networks {
+                    network_rx_bytes += net.rx_bytes;
+                    network_tx_bytes += net.tx_bytes;
+                }
+            }
+
+            if let Some(entries) = stats.blkio_stats.io_service_bytes_recursive {
+                for entry in entries {
+                    let op = entry.op.to_uppercase();
+                    if op == "READ" {
+                        disk_read_bytes += entry.value;
+                    } else if op == "WRITE" {
+                        disk_write_bytes += entry.value;
+                    }
+                }
+            }
+        }
+
+        result.push(ContainerMetrics {
+            name,
+            status,
+            cpu_percent,
+            memory_used_bytes,
+            memory_limit_bytes,
+            network_rx_bytes,
+            network_tx_bytes,
+            disk_read_bytes,
+            disk_write_bytes,
+            image,
+            tag,
+            restart_count,
+        });
+    }
+
+    result
+}
+
+fn split_image(image: &str) -> (String, String) {
+    if let Some((name, tag)) = image.rsplit_once(':') {
+        (name.to_string(), tag.to_string())
+    } else {
+        (image.to_string(), "latest".to_string())
+    }
+}
+
+fn init_db(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            last_seen INTEGER NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS system_metrics_history (
+            ts INTEGER PRIMARY KEY,
+            cpu_percent REAL NOT NULL,
+            memory_percent REAL NOT NULL,
+            disk_percent REAL NOT NULL,
+            network_total_bytes INTEGER NOT NULL,
+            process_count INTEGER NOT NULL,
+            load_1 REAL NOT NULL,
+            load_5 REAL NOT NULL,
+            load_15 REAL NOT NULL,
+            container_count INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS container_metrics_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            cpu_percent REAL NOT NULL,
+            memory_used_bytes INTEGER NOT NULL,
+            memory_limit_bytes INTEGER NOT NULL,
+            network_rx_bytes INTEGER NOT NULL,
+            network_tx_bytes INTEGER NOT NULL,
+            disk_read_bytes INTEGER NOT NULL,
+            disk_write_bytes INTEGER NOT NULL,
+            image TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            restart_count INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_system_history_ts ON system_metrics_history(ts);
+        CREATE INDEX IF NOT EXISTS idx_container_history_ts ON container_metrics_history(ts);
+        CREATE INDEX IF NOT EXISTS idx_container_history_name_ts ON container_metrics_history(name, ts);
+        ",
+    )?;
+    Ok(())
+}
+
+fn state_needs_setup(state: &AppState) -> bool {
+    let db = state.db.lock().expect("db lock");
+    let users: i64 = db
+        .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+        .unwrap_or(0);
+    users == 0
+}
+
+fn resolve_session_from_headers(state: &AppState, headers: &HeaderMap) -> Option<AuthSession> {
+    let token = extract_cookie(headers, AUTH_COOKIE_NAME)?;
+    validate_and_extend_session(state, &token)
+}
+
+fn validate_and_extend_session(state: &AppState, token: &str) -> Option<AuthSession> {
+    let now = now_ts();
+    let expires_at = now + TOKEN_LIFETIME_SECS;
+    let db = state.db.lock().expect("db lock");
+
+    let session = db
+        .query_row(
+            "
+            SELECT users.id, users.username, sessions.expires_at
+            FROM sessions
+            JOIN users ON users.id = sessions.user_id
+            WHERE sessions.token = ?1
+            ",
+            params![token],
+            |row| {
+                let user_id: i64 = row.get(0)?;
+                let username: String = row.get(1)?;
+                let session_expiry: i64 = row.get(2)?;
+                Ok((user_id, username, session_expiry))
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()?;
+
+    if session.2 < now {
+        let _ = db.execute("DELETE FROM sessions WHERE token = ?1", params![token]);
+        return None;
+    }
+
+    let _ = db.execute(
+        "UPDATE sessions SET expires_at = ?1, last_seen = ?2 WHERE token = ?3",
+        params![expires_at, now, token],
+    );
+
+    Some(AuthSession {
+        user_id: session.0,
+        username: session.1,
+    })
+}
+
+fn create_session_token(state: &AppState, user_id: i64) -> Option<String> {
+    let now = now_ts();
+    let expires_at = now + TOKEN_LIFETIME_SECS;
+    let token = Uuid::new_v4().to_string();
+    let db = state.db.lock().expect("db lock");
+
+    let inserted = db.execute(
+        "INSERT INTO sessions(token, user_id, expires_at, last_seen) VALUES (?1, ?2, ?3, ?4)",
+        params![token, user_id, expires_at, now],
+    );
+    if inserted.is_ok() {
+        Some(token)
+    } else {
+        None
+    }
+}
+
+fn hash_password(password: &str) -> Result<String, String> {
+    let salt = SaltString::generate(&mut OsRng);
+    let hashed = Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|_| "hash error".to_string())?
+        .to_string();
+    Ok(hashed)
+}
+
+fn verify_password(password: &str, hash: &str) -> bool {
+    let parsed = match PasswordHash::new(hash) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok()
+}
+
+fn now_ts() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn extract_cookie(headers: &HeaderMap, key: &str) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    let mut map = HashMap::new();
+    for part in raw.split(';') {
+        let trimmed = part.trim();
+        if let Some((k, v)) = trimmed.split_once('=') {
+            map.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    map.get(key).cloned()
+}
+
+fn build_auth_cookie(token: &str) -> String {
+    format!(
+        "{}={}; Max-Age={}; Path=/; HttpOnly; SameSite=Lax",
+        AUTH_COOKIE_NAME, token, TOKEN_LIFETIME_SECS
+    )
+}
+
+fn clear_auth_cookie() -> String {
+    format!(
+        "{}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax",
+        AUTH_COOKIE_NAME
+    )
+}
+
+fn with_auth_cookie<T: IntoResponse>(body: T, token: &str) -> Response {
+    let mut response = body.into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&build_auth_cookie(token)).expect("valid set-cookie"),
+    );
+    response
+}
+
+fn json_error(code: StatusCode, msg: &str) -> Response {
+    (code, Json(serde_json::json!({ "error": msg }))).into_response()
+}

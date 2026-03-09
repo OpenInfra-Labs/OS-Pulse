@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OS-Pulse · Login</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="auth-wrap">
+    <section class="card auth-card">
+      <div class="brand">
+        <div class="brand-dot"></div>
+        <h2>OS-Pulse</h2>
+      </div>
+      <p id="subtitle">Loading authentication mode...</p>
+
+      <form id="authForm">
+        <label for="username">Username</label>
+        <input id="username" name="username" autocomplete="username" required />
+
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+
+        <button type="submit" id="submitBtn">Continue</button>
+      </form>
+      <div id="error" class="error"></div>
+      <div id="tip" class="tip"></div>
+    </section>
+  </main>
+
+  <script>
+    const subtitle = document.getElementById('subtitle');
+    const tip = document.getElementById('tip');
+    const error = document.getElementById('error');
+    const submitBtn = document.getElementById('submitBtn');
+    const form = document.getElementById('authForm');
+
+    let mode = 'login';
+
+    async function bootstrap() {
+      const res = await fetch('/api/auth/state', { credentials: 'include' });
+      if (!res.ok) {
+        subtitle.textContent = 'Unable to connect to authentication service.';
+        return;
+      }
+      const data = await res.json();
+      if (data.logged_in) {
+        window.location.href = '/dashboard';
+        return;
+      }
+      mode = data.needs_setup ? 'setup' : 'login';
+      if (mode === 'setup') {
+        subtitle.textContent = 'First launch detected. Create an administrator account.';
+        submitBtn.textContent = 'Create Account';
+        tip.textContent = 'This step appears only once. All future access requires login.';
+      } else {
+        subtitle.textContent = 'Sign in to access system and container monitoring.';
+        submitBtn.textContent = 'Login';
+        tip.textContent = 'Session token expires after 3 days of inactivity and extends on each operation.';
+      }
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      error.textContent = '';
+      const payload = {
+        username: document.getElementById('username').value.trim(),
+        password: document.getElementById('password').value,
+      };
+      if (!payload.username || !payload.password) {
+        error.textContent = 'Username and password are required.';
+        return;
+      }
+      const endpoint = mode === 'setup' ? '/api/auth/setup' : '/api/auth/login';
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        error.textContent = data.error || 'Authentication failed.';
+        return;
+      }
+      window.location.href = '/dashboard';
+    });
+
+    bootstrap();
+  </script>
+</body>
+</html>

@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OS-Pulse · Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="page">
+    <header class="topbar">
+      <div>
+        <h2>OS-Pulse Dashboard</h2>
+        <p id="welcome">Signed in</p>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center;">
+        <div class="status-chip"><span></span> Live</div>
+        <button id="logoutBtn" style="margin:0; width:auto; padding:10px 14px;">Logout</button>
+      </div>
+    </header>
+
+    <section class="grid" id="metricsGrid">
+      <article class="card metric"><h3>CPU Usage</h3><div class="v" id="cpuV">--</div><div class="s" id="cpuS">--</div></article>
+      <article class="card metric"><h3>Memory Usage</h3><div class="v" id="memV">--</div><div class="s" id="memS">--</div></article>
+      <article class="card metric"><h3>Disk Usage</h3><div class="v" id="diskV">--</div><div class="s" id="diskS">--</div></article>
+      <article class="card metric"><h3>Network Total</h3><div class="v" id="netV">--</div><div class="s" id="netS">--</div></article>
+    </section>
+
+    <section class="card section">
+      <div class="trend-head">
+        <h3>Historical Trends (Last 60 Minutes)</h3>
+      </div>
+      <div class="trend-grid">
+        <article class="trend-card">
+          <h4>CPU %</h4>
+          <canvas id="cpuTrend" width="360" height="120"></canvas>
+        </article>
+        <article class="trend-card">
+          <h4>Memory %</h4>
+          <canvas id="memTrend" width="360" height="120"></canvas>
+        </article>
+        <article class="trend-card">
+          <h4>Disk %</h4>
+          <canvas id="diskTrend" width="360" height="120"></canvas>
+        </article>
+      </div>
+    </section>
+
+    <section class="card section">
+      <h3>Containers</h3>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Status</th>
+            <th>CPU</th>
+            <th>Memory</th>
+            <th>Network</th>
+            <th>Disk I/O</th>
+            <th>Image</th>
+            <th>Tag</th>
+            <th>Restarts</th>
+          </tr>
+        </thead>
+        <tbody id="containerRows"></tbody>
+      </table>
+      <div id="containerEmpty" class="empty" style="display:none;">No containers found or Docker socket unavailable.</div>
+    </section>
+  </main>
+
+  <script>
+    function fmtBytes(n) {
+      if (n === null || n === undefined) return '--';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let i = 0;
+      let v = Number(n);
+      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+      return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`;
+    }
+
+    async function loadMe() {
+      const res = await fetch('/api/me', { credentials: 'include' });
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      const me = await res.json();
+      document.getElementById('welcome').textContent = `Signed in as ${me.username}`;
+    }
+
+    async function loadMetrics() {
+      const res = await fetch('/api/metrics', { credentials: 'include' });
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      const data = await res.json();
+      const s = data.system;
+      document.getElementById('cpuV').textContent = `${s.cpu_percent.toFixed(1)}%`;
+      document.getElementById('cpuS').textContent = `Load ${s.load_1.toFixed(2)} / ${s.load_5.toFixed(2)} / ${s.load_15.toFixed(2)}`;
+      document.getElementById('memV').textContent = `${s.memory_percent.toFixed(1)}%`;
+      document.getElementById('memS').textContent = `${fmtBytes(s.memory_used_bytes)} / ${fmtBytes(s.memory_total_bytes)}`;
+      document.getElementById('diskV').textContent = `${s.disk_percent.toFixed(1)}%`;
+      document.getElementById('diskS').textContent = `${fmtBytes(s.disk_used_bytes)} / ${fmtBytes(s.disk_total_bytes)}`;
+      document.getElementById('netV').textContent = `${fmtBytes(s.network_rx_bytes + s.network_tx_bytes)}`;
+      document.getElementById('netS').textContent = `RX ${fmtBytes(s.network_rx_bytes)} · TX ${fmtBytes(s.network_tx_bytes)}`;
+
+      const rows = document.getElementById('containerRows');
+      const empty = document.getElementById('containerEmpty');
+      rows.innerHTML = '';
+      if (!data.containers.length) {
+        empty.style.display = 'block';
+      } else {
+        empty.style.display = 'none';
+        for (const c of data.containers) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${c.name}</td>
+            <td>${c.status}</td>
+            <td>${c.cpu_percent.toFixed(1)}%</td>
+            <td>${fmtBytes(c.memory_used_bytes)} / ${fmtBytes(c.memory_limit_bytes)}</td>
+            <td>RX ${fmtBytes(c.network_rx_bytes)} · TX ${fmtBytes(c.network_tx_bytes)}</td>
+            <td>R ${fmtBytes(c.disk_read_bytes)} · W ${fmtBytes(c.disk_write_bytes)}</td>
+            <td>${c.image}</td>
+            <td>${c.tag}</td>
+            <td>${c.restart_count}</td>
+          `;
+          rows.appendChild(tr);
+        }
+      }
+    }
+
+    function drawLine(canvasId, values, color) {
+      const canvas = document.getElementById(canvasId);
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+
+      ctx.strokeStyle = 'rgba(120,147,198,0.25)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, h - 0.5);
+      ctx.lineTo(w, h - 0.5);
+      ctx.stroke();
+
+      if (!values.length) return;
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const range = Math.max(1, max - min);
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (let i = 0; i < values.length; i++) {
+        const x = (i / Math.max(1, values.length - 1)) * w;
+        const y = h - ((values[i] - min) / range) * (h - 8) - 4;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    async function loadTrends() {
+      const res = await fetch('/api/trends?minutes=60', { credentials: 'include' });
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      const data = await res.json();
+      const points = data.points || [];
+      drawLine('cpuTrend', points.map(p => p.cpu_percent), '#54c7ff');
+      drawLine('memTrend', points.map(p => p.memory_percent), '#7b61ff');
+      drawLine('diskTrend', points.map(p => p.disk_percent), '#30d188');
+    }
+
+    document.getElementById('logoutBtn').addEventListener('click', async () => {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+      window.location.href = '/login';
+    });
+
+    async function pulse() {
+      await loadMetrics();
+      await loadTrends();
+      await fetch('/api/action', { method: 'POST', credentials: 'include' });
+    }
+
+    loadMe().then(() => pulse());
+    setInterval(pulse, 3000);
+  </script>
+</body>
+</html>

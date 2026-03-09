@@ -50,6 +50,7 @@ It runs equally well **on the host** or **inside a container**.
 - **TimescaleDB** — PostgreSQL extension for time-series workloads
 - Configurable retention policies
 - Supports trend analysis and cross-period comparison
+- Built-in SQLite history tables for system and container snapshots
 
 ### Web Dashboard
 - Clean, responsive single-page UI
@@ -57,6 +58,17 @@ It runs equally well **on the host** or **inside a container**.
 - Historical trend graphs with selectable time ranges
 - Dark / light theme
 - No external dependencies — assets are embedded in the binary
+
+### Implemented in Current Version
+- Background sampler collects host + container metrics continuously
+- Sampling interval configurable via `OSP_INTERVAL` (seconds, default `1`)
+- Historical trend API: `GET /api/trends?minutes=60` (login required)
+
+### Authentication & Access Control
+- First-time startup requires creating the initial account on the login page
+- All subsequent access is gated by login before entering the dashboard
+- Token-based session authentication (HTTP-only cookie)
+- Token lifetime is **3 days** and automatically extends on each authenticated operation
 
 ---
 
@@ -122,6 +134,8 @@ The binary will be at `target/release/os-pulse`.
 ```
 
 Then open **http://localhost:3000** in your browser.
+
+On first access, you will be redirected to the login page and asked to create the initial account.
 
 ### Run with Docker
 

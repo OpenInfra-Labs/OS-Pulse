@@ -405,7 +405,7 @@ async fn api_trends(
             cpu_percent: (cpu_sum / c) as f32,
             memory_percent: (memory_sum / c) as f32,
             disk_io_bytes: (disk_io_sum / c) as u64,
-            network_total_bytes: (network_sum / c) as u64,
+            network_total_bytes: network_sum as u64,
             container_count: (container_sum / c).round() as usize,
         })
     }) {

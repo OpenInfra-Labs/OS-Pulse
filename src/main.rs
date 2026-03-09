@@ -27,7 +27,7 @@ use futures_util::StreamExt;
 use rand_core::OsRng;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use sysinfo::{CpuExt, DiskExt, NetworkExt, System, SystemExt};
+use sysinfo::{CpuExt, DiskExt, NetworkExt, ProcessExt, System, SystemExt};
 use uuid::Uuid;
 
 const TOKEN_LIFETIME_SECS: i64 = 3 * 24 * 60 * 60;
@@ -39,6 +39,7 @@ struct AppState {
     db: Arc<Mutex<Connection>>,
     latest: Arc<Mutex<Option<MetricsResponse>>>,
     network_baseline: Arc<Mutex<Option<NetworkBaseline>>>,
+    disk_baseline: Arc<Mutex<Option<DiskBaseline>>>,
     sample_interval_secs: u64,
 }
 
@@ -47,6 +48,13 @@ struct NetworkBaseline {
     ts: i64,
     rx_total: u64,
     tx_total: u64,
+}
+
+#[derive(Clone, Copy)]
+struct DiskBaseline {
+    ts: i64,
+    read_total: u64,
+    write_total: u64,
 }
 
 #[derive(Clone)]
@@ -82,6 +90,7 @@ struct SystemMetrics {
     disk_total_bytes: u64,
     disk_used_bytes: u64,
     disk_percent: f32,
+    disk_io_bytes: u64,
     network_rx_bytes: u64,
     network_tx_bytes: u64,
     process_count: usize,
@@ -123,7 +132,7 @@ struct TrendPoint {
     ts: i64,
     cpu_percent: f32,
     memory_percent: f32,
-    disk_percent: f32,
+    disk_io_bytes: u64,
     network_total_bytes: u64,
     container_count: usize,
 }
@@ -175,6 +184,7 @@ async fn main() {
         db: Arc::new(Mutex::new(connection)),
         latest: Arc::new(Mutex::new(None)),
         network_baseline: Arc::new(Mutex::new(None)),
+        disk_baseline: Arc::new(Mutex::new(None)),
         sample_interval_secs,
     };
 
@@ -360,30 +370,41 @@ async fn api_trends(
     State(state): State<AppState>,
     Query(query): Query<TrendQuery>,
 ) -> impl IntoResponse {
-    let minutes = query.minutes.unwrap_or(60).clamp(5, 7 * 24 * 60);
-    let from_ts = now_ts() - (minutes as i64 * 60);
+    let requested = query.minutes.unwrap_or(60).clamp(5, 7 * 24 * 60);
+    let minutes = normalize_window_minutes(requested);
+    let now_ms = now_ts_ms();
+    let from_ms = now_ms - (minutes as i64 * 60 * 1000);
 
     let db = state.db.lock().expect("db lock");
     let mut stmt = match db.prepare(
         "
-        SELECT ts, cpu_percent, memory_percent, disk_percent, network_total_bytes, container_count
-        FROM system_metrics_history
-        WHERE ts >= ?1
-        ORDER BY ts ASC
+        SELECT bucket_end_ms, cpu_sum, memory_sum, disk_io_sum, network_sum, container_sum, samples
+        FROM system_metrics_agg
+        WHERE window_minutes = ?1 AND bucket_end_ms >= ?2
+        ORDER BY bucket_end_ms ASC
+        LIMIT ?3
         ",
     ) {
         Ok(v) => v,
         Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Query failed"),
     };
 
-    let rows = match stmt.query_map(params![from_ts], |row| {
+    let rows = match stmt.query_map(params![minutes as i64, from_ms, MAX_TREND_POINTS as i64], |row| {
+        let bucket_end_ms: i64 = row.get(0)?;
+        let cpu_sum: f64 = row.get(1)?;
+        let memory_sum: f64 = row.get(2)?;
+        let disk_io_sum: f64 = row.get(3)?;
+        let network_sum: f64 = row.get(4)?;
+        let container_sum: f64 = row.get(5)?;
+        let samples: i64 = row.get(6)?;
+        let c = samples.max(1) as f64;
         Ok(TrendPoint {
-            ts: row.get(0)?,
-            cpu_percent: row.get(1)?,
-            memory_percent: row.get(2)?,
-            disk_percent: row.get(3)?,
-            network_total_bytes: row.get(4)?,
-            container_count: row.get::<_, i64>(5)? as usize,
+            ts: bucket_end_ms / 1000,
+            cpu_percent: (cpu_sum / c) as f32,
+            memory_percent: (memory_sum / c) as f32,
+            disk_io_bytes: (disk_io_sum / c) as u64,
+            network_total_bytes: (network_sum / c) as u64,
+            container_count: (container_sum / c).round() as usize,
         })
     }) {
         Ok(v) => v,
@@ -397,18 +418,15 @@ async fn api_trends(
         }
     }
 
-    let raw_len = points.len();
-    let available_minutes = if raw_len >= 2 {
-        let first_ts = points.first().map(|p| p.ts).unwrap_or(from_ts);
-        let last_ts = points.last().map(|p| p.ts).unwrap_or(from_ts);
+    let returned_points = points.len();
+    let available_minutes = if returned_points >= 2 {
+        let first_ts = points.first().map(|p| p.ts).unwrap_or(0);
+        let last_ts = points.last().map(|p| p.ts).unwrap_or(0);
         ((last_ts - first_ts).max(0) / 60) as u32
     } else {
         0
     };
-
-    let sampled = raw_len > MAX_TREND_POINTS;
-    points = downsample_trend_points(points, MAX_TREND_POINTS);
-    let returned_points = points.len();
+    let sampled = false;
 
     Json(TrendResponse {
         points,
@@ -575,6 +593,14 @@ fn collect_system_metrics(state: &AppState) -> SystemMetrics {
         network_tx_total += data.total_transmitted();
     }
 
+    let mut disk_read_total = 0_u64;
+    let mut disk_write_total = 0_u64;
+    for process in system.processes().values() {
+        let usage = process.disk_usage();
+        disk_read_total += usage.total_read_bytes;
+        disk_write_total += usage.total_written_bytes;
+    }
+
     let now = now_ts();
     let (network_rx_bytes, network_tx_bytes) = {
         let mut baseline = state.network_baseline.lock().expect("network baseline lock");
@@ -598,6 +624,26 @@ fn collect_system_metrics(state: &AppState) -> SystemMetrics {
         (rx_bps, tx_bps)
     };
 
+    let disk_io_bytes = {
+        let mut baseline = state.disk_baseline.lock().expect("disk baseline lock");
+        let mut io_bps = 0_u64;
+
+        if let Some(prev) = *baseline {
+            let delta_t = (now - prev.ts).max(1) as u64;
+            let delta_read = disk_read_total.saturating_sub(prev.read_total);
+            let delta_write = disk_write_total.saturating_sub(prev.write_total);
+            io_bps = (delta_read + delta_write) / delta_t;
+        }
+
+        *baseline = Some(DiskBaseline {
+            ts: now,
+            read_total: disk_read_total,
+            write_total: disk_write_total,
+        });
+
+        io_bps
+    };
+
     let load = system.load_average();
     SystemMetrics {
         cpu_percent: system.global_cpu_info().cpu_usage(),
@@ -607,6 +653,7 @@ fn collect_system_metrics(state: &AppState) -> SystemMetrics {
         disk_total_bytes,
         disk_used_bytes,
         disk_percent,
+        disk_io_bytes,
         network_rx_bytes,
         network_tx_bytes,
         process_count: system.processes().len(),
@@ -680,15 +727,16 @@ fn persist_snapshot(state: &AppState, snapshot: &MetricsResponse) {
     let _ = db.execute(
         "
         INSERT INTO system_metrics_history(
-            ts, cpu_percent, memory_percent, disk_percent, network_total_bytes,
+            ts, cpu_percent, memory_percent, disk_percent, disk_io_bytes, network_total_bytes,
             process_count, load_1, load_5, load_15, container_count
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ",
         params![
             snapshot.ts,
             snapshot.system.cpu_percent,
             snapshot.system.memory_percent,
             snapshot.system.disk_percent,
+            snapshot.system.disk_io_bytes as i64,
             snapshot.system.network_rx_bytes + snapshot.system.network_tx_bytes,
             snapshot.system.process_count as i64,
             snapshot.system.load_1,
@@ -697,6 +745,8 @@ fn persist_snapshot(state: &AppState, snapshot: &MetricsResponse) {
             snapshot.containers.len() as i64,
         ],
     );
+
+    update_system_aggregates(&db, snapshot);
 
     for container in &snapshot.containers {
         let _ = db.execute(
@@ -722,6 +772,52 @@ fn persist_snapshot(state: &AppState, snapshot: &MetricsResponse) {
                 container.tag,
                 container.restart_count,
             ],
+        );
+    }
+}
+
+fn update_system_aggregates(db: &Connection, snapshot: &MetricsResponse) {
+    let windows = [15_u32, 60_u32, 360_u32, 1440_u32];
+    let sample_ms = snapshot.ts * 1000;
+    let network_total = snapshot.system.network_rx_bytes + snapshot.system.network_tx_bytes;
+    let container_count = snapshot.containers.len() as f64;
+
+    for minutes in windows {
+        let bucket_ms = (minutes as i64 * 60 * 1000) / MAX_TREND_POINTS as i64;
+        let bucket_start_ms = sample_ms - (sample_ms % bucket_ms);
+        let bucket_end_ms = bucket_start_ms + bucket_ms;
+        let keep_from_ms = sample_ms - (minutes as i64 * 60 * 1000);
+
+        let _ = db.execute(
+            "
+            INSERT INTO system_metrics_agg(
+                window_minutes, bucket_start_ms, bucket_end_ms,
+                cpu_sum, memory_sum, disk_io_sum, network_sum, container_sum, samples
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
+            ON CONFLICT(window_minutes, bucket_start_ms) DO UPDATE SET
+                bucket_end_ms = excluded.bucket_end_ms,
+                cpu_sum = system_metrics_agg.cpu_sum + excluded.cpu_sum,
+                memory_sum = system_metrics_agg.memory_sum + excluded.memory_sum,
+                disk_io_sum = system_metrics_agg.disk_io_sum + excluded.disk_io_sum,
+                network_sum = system_metrics_agg.network_sum + excluded.network_sum,
+                container_sum = system_metrics_agg.container_sum + excluded.container_sum,
+                samples = system_metrics_agg.samples + 1
+            ",
+            params![
+                minutes as i64,
+                bucket_start_ms,
+                bucket_end_ms,
+                snapshot.system.cpu_percent as f64,
+                snapshot.system.memory_percent as f64,
+                snapshot.system.disk_io_bytes as f64,
+                network_total as f64,
+                container_count,
+            ],
+        );
+
+        let _ = db.execute(
+            "DELETE FROM system_metrics_agg WHERE window_minutes = ?1 AND bucket_end_ms < ?2",
+            params![minutes as i64, keep_from_ms],
         );
     }
 }
@@ -875,78 +971,16 @@ fn split_image(image: &str) -> (String, String) {
     }
 }
 
-fn downsample_trend_points(points: Vec<TrendPoint>, max_points: usize) -> Vec<TrendPoint> {
-    if points.len() <= max_points || max_points == 0 {
-        return points;
+fn normalize_window_minutes(requested: u32) -> u32 {
+    if requested <= 15 {
+        15
+    } else if requested <= 60 {
+        60
+    } else if requested <= 360 {
+        360
+    } else {
+        1440
     }
-
-    let first_ts = points.first().map(|p| p.ts).unwrap_or(0);
-    let last_ts = points.last().map(|p| p.ts).unwrap_or(first_ts);
-    if first_ts >= last_ts {
-        return points.into_iter().take(max_points).collect();
-    }
-
-    let span = (last_ts - first_ts + 1) as i128;
-    let bucket_count = max_points;
-
-    #[derive(Clone, Copy)]
-    struct TrendAgg {
-        ts: i64,
-        cpu: f64,
-        mem: f64,
-        disk: f64,
-        net: f64,
-        containers: f64,
-        count: u32,
-    }
-
-    let mut buckets: Vec<Option<TrendAgg>> = vec![None; bucket_count];
-    for point in points {
-        let offset = (point.ts - first_ts) as i128;
-        let mut idx = ((offset * bucket_count as i128) / span) as usize;
-        if idx >= bucket_count {
-            idx = bucket_count - 1;
-        }
-
-        match &mut buckets[idx] {
-            Some(agg) => {
-                agg.ts = point.ts;
-                agg.cpu += point.cpu_percent as f64;
-                agg.mem += point.memory_percent as f64;
-                agg.disk += point.disk_percent as f64;
-                agg.net += point.network_total_bytes as f64;
-                agg.containers += point.container_count as f64;
-                agg.count += 1;
-            }
-            None => {
-                buckets[idx] = Some(TrendAgg {
-                    ts: point.ts,
-                    cpu: point.cpu_percent as f64,
-                    mem: point.memory_percent as f64,
-                    disk: point.disk_percent as f64,
-                    net: point.network_total_bytes as f64,
-                    containers: point.container_count as f64,
-                    count: 1,
-                });
-            }
-        }
-    }
-
-    buckets
-        .into_iter()
-        .flatten()
-        .map(|agg| {
-            let c = agg.count.max(1) as f64;
-            TrendPoint {
-                ts: agg.ts,
-                cpu_percent: (agg.cpu / c) as f32,
-                memory_percent: (agg.mem / c) as f32,
-                disk_percent: (agg.disk / c) as f32,
-                network_total_bytes: (agg.net / c) as u64,
-                container_count: (agg.containers / c).round() as usize,
-            }
-        })
-        .collect()
 }
 
 fn downsample_container_trend_points(
@@ -1049,12 +1083,26 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             cpu_percent REAL NOT NULL,
             memory_percent REAL NOT NULL,
             disk_percent REAL NOT NULL,
+            disk_io_bytes INTEGER NOT NULL DEFAULT 0,
             network_total_bytes INTEGER NOT NULL,
             process_count INTEGER NOT NULL,
             load_1 REAL NOT NULL,
             load_5 REAL NOT NULL,
             load_15 REAL NOT NULL,
             container_count INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS system_metrics_agg (
+            window_minutes INTEGER NOT NULL,
+            bucket_start_ms INTEGER NOT NULL,
+            bucket_end_ms INTEGER NOT NULL,
+            cpu_sum REAL NOT NULL,
+            memory_sum REAL NOT NULL,
+            disk_io_sum REAL NOT NULL,
+            network_sum REAL NOT NULL,
+            container_sum REAL NOT NULL,
+            samples INTEGER NOT NULL,
+            PRIMARY KEY(window_minutes, bucket_start_ms)
         );
 
         CREATE TABLE IF NOT EXISTS container_metrics_history (
@@ -1076,10 +1124,16 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
         CREATE INDEX IF NOT EXISTS idx_system_history_ts ON system_metrics_history(ts);
+        CREATE INDEX IF NOT EXISTS idx_system_agg_window_end ON system_metrics_agg(window_minutes, bucket_end_ms);
         CREATE INDEX IF NOT EXISTS idx_container_history_ts ON container_metrics_history(ts);
         CREATE INDEX IF NOT EXISTS idx_container_history_name_ts ON container_metrics_history(name, ts);
         ",
     )?;
+
+    let _ = conn.execute(
+        "ALTER TABLE system_metrics_history ADD COLUMN disk_io_bytes INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     Ok(())
 }
 
@@ -1177,6 +1231,13 @@ fn now_ts() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn now_ts_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 

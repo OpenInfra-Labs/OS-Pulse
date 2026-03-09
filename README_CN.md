@@ -137,21 +137,33 @@ OSP_INTERVAL=2 ./target/release/os-pulse
 
 ### 使用 Docker 运行
 
-目前没有预构建的 Docker 镜像，请使用项目内的 `Dockerfile` 从源码构建：
+目前没有预构建的 Docker 镜像。启动一个 Rust 容器，在其中构建即可：
 
 ```bash
-# 构建镜像
-docker build -t os-pulse .
-
-# 运行容器
-docker run -d \
+# 1. 创建一个持久化的 Rust 容器
+docker run -dit \
   --name os-pulse \
   -p 3000:3000 \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  os-pulse
+  rust:latest
+
+# 2. 进入容器
+docker exec -it os-pulse bash
+
+# 3. 克隆、构建并运行（在容器内执行）
+git clone https://github.com/OpenInfra-Labs/OS-Pulse.git
+cd OS-Pulse
+cargo build --release
+./target/release/os-pulse
 ```
 
+然后在宿主机浏览器中打开 **http://localhost:3000**。
+
+> **提示：** 容器在后台持续运行，随时可以通过 `docker exec -it os-pulse bash` 重新进入。
+
 ### Docker Compose
+
+也可以使用项目内的 `Dockerfile` 构建独立镜像：
 
 ```yaml
 version: "3.8"
@@ -165,20 +177,6 @@ services:
     environment:
       - OSP_INTERVAL=1
     restart: unless-stopped
-```
-
-### 使用 Rust 容器快速体验
-
-如果本地未安装 Rust 工具链，可以直接在 Rust 容器内构建和运行：
-
- ```bash
-docker run -it --rm \
-  -p 3000:3000 \
-  -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v "$(pwd)":/app \
-  -w /app \
-  rust:1.85-bookworm \
-  bash -c "cargo build --release && ./target/release/os-pulse"
 ```
 
 ---

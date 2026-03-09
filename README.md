@@ -137,21 +137,33 @@ On first access, you will be redirected to the login page and asked to create th
 
 ### Run with Docker
 
-There is no pre-built image yet. Build from source using the included `Dockerfile`:
+No pre-built image is published yet. Start a Rust container and build inside it:
 
 ```bash
-# Build the image
-docker build -t os-pulse .
-
-# Run the container
-docker run -d \
+# 1. Create a persistent Rust container
+docker run -dit \
   --name os-pulse \
   -p 3000:3000 \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  os-pulse
+  rust:latest
+
+# 2. Enter the container
+docker exec -it os-pulse bash
+
+# 3. Clone, build and run (inside the container)
+git clone https://github.com/OpenInfra-Labs/OS-Pulse.git
+cd OS-Pulse
+cargo build --release
+./target/release/os-pulse
 ```
 
+Then open **http://localhost:3000** from your host browser.
+
+> **Tip:** The container keeps running in the background. You can re-attach with `docker exec -it os-pulse bash` at any time.
+
 ### Docker Compose
+
+Alternatively, use the included `Dockerfile` for a self-contained image:
 
 ```yaml
 version: "3.8"
@@ -165,20 +177,6 @@ services:
     environment:
       - OSP_INTERVAL=1
     restart: unless-stopped
-```
-
-### Quick Try with a Rust Container
-
-If you don't have the Rust toolchain installed locally, you can build and run inside a Rust container:
-
-```bash
-docker run -it --rm \
-  -p 3000:3000 \
-  -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v "$(pwd)":/app \
-  -w /app \
-  rust:1.85-bookworm \
-  bash -c "cargo build --release && ./target/release/os-pulse"
 ```
 
 ---

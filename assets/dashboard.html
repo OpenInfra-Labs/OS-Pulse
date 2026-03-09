@@ -125,6 +125,10 @@
       },
     };
 
+    function escapeHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
     function fmtBytes(n) {
       if (n === null || n === undefined) return '--';
       const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -194,14 +198,14 @@
         for (const c of data.containers) {
           const tr = document.createElement('tr');
           tr.innerHTML = `
-            <td>${c.name}</td>
-            <td>${c.status}</td>
+            <td>${escapeHtml(c.name)}</td>
+            <td>${escapeHtml(c.status)}</td>
             <td>${c.cpu_percent.toFixed(1)}%</td>
             <td>${fmtBytes(c.memory_used_bytes)} / ${fmtBytes(c.memory_limit_bytes)}</td>
             <td>RX ${fmtBytes(c.network_rx_bytes)} · TX ${fmtBytes(c.network_tx_bytes)}</td>
             <td>R ${fmtBytes(c.disk_read_bytes)} · W ${fmtBytes(c.disk_write_bytes)}</td>
-            <td>${c.image}</td>
-            <td>${c.tag}</td>
+            <td>${escapeHtml(c.image)}</td>
+            <td>${escapeHtml(c.tag)}</td>
             <td>${c.restart_count}</td>
           `;
           rows.appendChild(tr);
@@ -431,10 +435,8 @@
     });
 
     async function pulse() {
-      await loadMetrics();
-      await loadTrends();
-      await loadContainerTrends();
-      await fetch('/api/action', { method: 'POST', credentials: 'include' });
+      await Promise.all([loadMetrics(), loadTrends(), loadContainerTrends()]);
+      fetch('/api/action', { method: 'POST', credentials: 'include' });
     }
 
     bindRangeButtons();

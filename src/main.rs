@@ -548,7 +548,7 @@ async fn api_trends(
     State(state): State<AppState>,
     Query(query): Query<TrendQuery>,
 ) -> impl IntoResponse {
-    let requested = query.minutes.unwrap_or(60).clamp(5, 7 * 24 * 60);
+    let requested = query.minutes.unwrap_or(15).clamp(5, 7 * 24 * 60);
     let minutes = normalize_window_minutes(requested);
     let now_ms = now_ts_ms();
     let from_ms = now_ms - (minutes as i64 * 60 * 1000);
@@ -579,18 +579,19 @@ async fn api_trends(
         let container_sum: f64 = row.get(7)?;
         let samples: i64 = row.get(8)?;
         let c = samples.max(1) as f64;
-        let (rx_sum, tx_sum) = if network_rx_sum == 0.0 && network_tx_sum == 0.0 {
-            estimate_network_split(&state, network_sum as u64)
+        let avg_net = (network_sum / c) as u64;
+        let (rx_avg, tx_avg) = if network_rx_sum == 0.0 && network_tx_sum == 0.0 {
+            estimate_network_split(&state, avg_net)
         } else {
-            (network_rx_sum as u64, network_tx_sum as u64)
+            ((network_rx_sum / c) as u64, (network_tx_sum / c) as u64)
         };
         Ok(TrendPoint {
             ts: bucket_end_ms / 1000,
             cpu_percent: (cpu_sum / c) as f32,
             memory_percent: (memory_sum / c) as f32,
             disk_iops: disk_iops_sum / c,
-            network_rx_bytes: rx_sum,
-            network_tx_bytes: tx_sum,
+            network_rx_bytes: rx_avg,
+            network_tx_bytes: tx_avg,
             container_count: (container_sum / c).round() as usize,
         })
     }) {
@@ -1115,7 +1116,7 @@ fn update_system_aggregates(db: &Connection, snapshot: &MetricsResponse) {
                 cpu_sum, memory_sum, disk_iops_sum,
                 network_sum, network_rx_sum, network_tx_sum,
                 container_sum, samples
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)
             ON CONFLICT(window_minutes, bucket_start_ms) DO UPDATE SET
                 bucket_end_ms = excluded.bucket_end_ms,
                 cpu_sum = system_metrics_agg.cpu_sum + excluded.cpu_sum,
@@ -1180,6 +1181,10 @@ fn maybe_cleanup_raw_history(state: &AppState, now_ts: i64) {
     let _ = db.execute(
         "DELETE FROM container_metrics_history WHERE ts < ?1",
         params![keep_from],
+    );
+    let _ = db.execute(
+        "DELETE FROM sessions WHERE expires_at < ?1",
+        params![now_ts],
     );
 }
 

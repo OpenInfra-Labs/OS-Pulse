@@ -245,6 +245,61 @@ async fn main() {
     axum::serve(listener, app).await.expect("start server");
 }
 
+fn ensure_system_metrics_agg_schema(conn: &Connection) -> rusqlite::Result<()> {
+    let mut has_legacy_disk_io_sum = false;
+    let mut stmt = conn.prepare("PRAGMA table_info(system_metrics_agg)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == "disk_io_sum" {
+            has_legacy_disk_io_sum = true;
+            break;
+        }
+    }
+
+    if !has_legacy_disk_io_sum {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "
+        ALTER TABLE system_metrics_agg RENAME TO system_metrics_agg_legacy;
+
+        CREATE TABLE system_metrics_agg (
+            window_minutes INTEGER NOT NULL,
+            bucket_start_ms INTEGER NOT NULL,
+            bucket_end_ms INTEGER NOT NULL,
+            cpu_sum REAL NOT NULL,
+            memory_sum REAL NOT NULL,
+            disk_iops_sum REAL NOT NULL,
+            network_sum REAL NOT NULL,
+            network_rx_sum REAL NOT NULL DEFAULT 0,
+            network_tx_sum REAL NOT NULL DEFAULT 0,
+            container_sum REAL NOT NULL,
+            samples INTEGER NOT NULL,
+            PRIMARY KEY(window_minutes, bucket_start_ms)
+        );
+
+        INSERT INTO system_metrics_agg(
+            window_minutes, bucket_start_ms, bucket_end_ms,
+            cpu_sum, memory_sum, disk_iops_sum,
+            network_sum, network_rx_sum, network_tx_sum,
+            container_sum, samples
+        )
+        SELECT
+            window_minutes, bucket_start_ms, bucket_end_ms,
+            cpu_sum, memory_sum, COALESCE(disk_iops_sum, 0),
+            network_sum, COALESCE(network_rx_sum, 0), COALESCE(network_tx_sum, 0),
+            container_sum, samples
+        FROM system_metrics_agg_legacy;
+
+        DROP TABLE system_metrics_agg_legacy;
+        CREATE INDEX IF NOT EXISTS idx_system_agg_window_end ON system_metrics_agg(window_minutes, bucket_end_ms);
+        ",
+    )?;
+
+    Ok(())
+}
+
 fn rebuild_recent_system_aggregates(conn: &Connection) -> rusqlite::Result<()> {
     let now_sec = now_ts();
     let now_ms = now_ts_ms();
@@ -1454,6 +1509,7 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE system_metrics_history ADD COLUMN network_tx_bytes INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    ensure_system_metrics_agg_schema(conn)?;
     Ok(())
 }
 

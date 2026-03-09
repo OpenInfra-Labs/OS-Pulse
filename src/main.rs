@@ -42,6 +42,8 @@ struct AppState {
     network_baseline: Arc<Mutex<Option<NetworkBaseline>>>,
     disk_baseline: Arc<Mutex<Option<DiskBaseline>>>,
     disk_xfrs_baseline: Arc<Mutex<Option<DiskXfrsBaseline>>>,
+    #[cfg(target_os = "linux")]
+    disk_ops_baseline: Arc<Mutex<Option<DiskOpsBaseline>>>,
     last_cleanup_day: Arc<Mutex<i64>>,
     sample_interval_secs: u64,
 }
@@ -64,6 +66,13 @@ struct DiskBaseline {
 struct DiskXfrsBaseline {
     ts: i64,
     xfrs_total: u64,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct DiskOpsBaseline {
+    ts: i64,
+    ops_total: u64,
 }
 
 #[derive(Clone)]
@@ -142,7 +151,8 @@ struct TrendPoint {
     cpu_percent: f32,
     memory_percent: f32,
     disk_iops: f64,
-    network_total_bytes: u64,
+    network_rx_bytes: u64,
+    network_tx_bytes: u64,
     container_count: usize,
 }
 
@@ -195,6 +205,8 @@ async fn main() {
         network_baseline: Arc::new(Mutex::new(None)),
         disk_baseline: Arc::new(Mutex::new(None)),
         disk_xfrs_baseline: Arc::new(Mutex::new(None)),
+        #[cfg(target_os = "linux")]
+        disk_ops_baseline: Arc::new(Mutex::new(None)),
         last_cleanup_day: Arc::new(Mutex::new(-1)),
         sample_interval_secs,
     };
@@ -389,7 +401,8 @@ async fn api_trends(
     let db = state.db.lock().expect("db lock");
     let mut stmt = match db.prepare(
         "
-        SELECT bucket_end_ms, cpu_sum, memory_sum, disk_iops_sum, network_sum, container_sum, samples
+        SELECT bucket_end_ms, cpu_sum, memory_sum, disk_iops_sum,
+               network_sum, network_rx_sum, network_tx_sum, container_sum, samples
         FROM system_metrics_agg
         WHERE window_minutes = ?1 AND bucket_end_ms >= ?2
         ORDER BY bucket_end_ms ASC
@@ -406,15 +419,23 @@ async fn api_trends(
         let memory_sum: f64 = row.get(2)?;
         let disk_iops_sum: f64 = row.get(3)?;
         let network_sum: f64 = row.get(4)?;
-        let container_sum: f64 = row.get(5)?;
-        let samples: i64 = row.get(6)?;
+        let network_rx_sum: f64 = row.get(5)?;
+        let network_tx_sum: f64 = row.get(6)?;
+        let container_sum: f64 = row.get(7)?;
+        let samples: i64 = row.get(8)?;
         let c = samples.max(1) as f64;
+        let (rx_sum, tx_sum) = if network_rx_sum == 0.0 && network_tx_sum == 0.0 {
+            (network_sum, 0.0)
+        } else {
+            (network_rx_sum, network_tx_sum)
+        };
         Ok(TrendPoint {
             ts: bucket_end_ms / 1000,
             cpu_percent: (cpu_sum / c) as f32,
             memory_percent: (memory_sum / c) as f32,
             disk_iops: disk_iops_sum / c,
-            network_total_bytes: network_sum as u64,
+            network_rx_bytes: rx_sum as u64,
+            network_tx_bytes: tx_sum as u64,
             container_count: (container_sum / c).round() as usize,
         })
     }) {
@@ -702,9 +723,35 @@ fn true_disk_iops_from_iostat(state: &AppState, now_ts: i64) -> Option<f64> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = state;
-        let _ = now_ts;
-        None
+        #[cfg(target_os = "linux")]
+        {
+            let total_ops = read_linux_total_disk_ops()?;
+            let mut baseline = state
+                .disk_ops_baseline
+                .lock()
+                .expect("disk ops baseline lock");
+
+            let iops = if let Some(prev) = *baseline {
+                let delta_t = (now_ts - prev.ts).max(1) as f64;
+                let delta_ops = total_ops.saturating_sub(prev.ops_total) as f64;
+                delta_ops / delta_t
+            } else {
+                0.0
+            };
+
+            *baseline = Some(DiskOpsBaseline {
+                ts: now_ts,
+                ops_total: total_ops,
+            });
+
+            Some(iops)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = state;
+            let _ = now_ts;
+            None
+        }
     }
 }
 
@@ -731,6 +778,34 @@ fn read_macos_total_xfrs() -> Option<u64> {
         }
     }
     None
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_total_disk_ops() -> Option<u64> {
+    let content = std::fs::read_to_string("/proc/diskstats").ok()?;
+    let mut total = 0_u64;
+
+    for line in content.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 8 {
+            continue;
+        }
+        let dev = cols[2];
+        if dev.starts_with("loop")
+            || dev.starts_with("ram")
+            || dev.starts_with("fd")
+            || dev.starts_with("sr")
+            || dev.starts_with("dm-")
+            || dev.starts_with("md")
+        {
+            continue;
+        }
+        let reads_completed = cols[3].parse::<u64>().ok()?;
+        let writes_completed = cols[7].parse::<u64>().ok()?;
+        total = total.saturating_add(reads_completed.saturating_add(writes_completed));
+    }
+
+    Some(total)
 }
 
 fn normalize_memory_to_bytes(value: u64) -> u64 {
@@ -849,7 +924,9 @@ fn persist_snapshot(state: &AppState, snapshot: &MetricsResponse) {
 fn update_system_aggregates(db: &Connection, snapshot: &MetricsResponse) {
     let windows = [15_u32, 60_u32, 360_u32, 1440_u32];
     let sample_ms = snapshot.ts * 1000;
-    let network_total = snapshot.system.network_rx_bytes + snapshot.system.network_tx_bytes;
+    let network_rx = snapshot.system.network_rx_bytes;
+    let network_tx = snapshot.system.network_tx_bytes;
+    let network_total = network_rx + network_tx;
     let container_count = snapshot.containers.len() as f64;
 
     for minutes in windows {
@@ -862,14 +939,18 @@ fn update_system_aggregates(db: &Connection, snapshot: &MetricsResponse) {
             "
             INSERT INTO system_metrics_agg(
                 window_minutes, bucket_start_ms, bucket_end_ms,
-                cpu_sum, memory_sum, disk_iops_sum, network_sum, container_sum, samples
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
+                cpu_sum, memory_sum, disk_iops_sum,
+                network_sum, network_rx_sum, network_tx_sum,
+                container_sum, samples
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1)
             ON CONFLICT(window_minutes, bucket_start_ms) DO UPDATE SET
                 bucket_end_ms = excluded.bucket_end_ms,
                 cpu_sum = system_metrics_agg.cpu_sum + excluded.cpu_sum,
                 memory_sum = system_metrics_agg.memory_sum + excluded.memory_sum,
                 disk_iops_sum = system_metrics_agg.disk_iops_sum + excluded.disk_iops_sum,
                 network_sum = system_metrics_agg.network_sum + excluded.network_sum,
+                network_rx_sum = system_metrics_agg.network_rx_sum + excluded.network_rx_sum,
+                network_tx_sum = system_metrics_agg.network_tx_sum + excluded.network_tx_sum,
                 container_sum = system_metrics_agg.container_sum + excluded.container_sum,
                 samples = system_metrics_agg.samples + 1
             ",
@@ -881,6 +962,8 @@ fn update_system_aggregates(db: &Connection, snapshot: &MetricsResponse) {
                 snapshot.system.memory_percent as f64,
                 snapshot.system.disk_iops,
                 network_total as f64,
+                network_rx as f64,
+                network_tx as f64,
                 container_count,
             ],
         );
@@ -1195,6 +1278,8 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             memory_sum REAL NOT NULL,
             disk_iops_sum REAL NOT NULL,
             network_sum REAL NOT NULL,
+            network_rx_sum REAL NOT NULL DEFAULT 0,
+            network_tx_sum REAL NOT NULL DEFAULT 0,
             container_sum REAL NOT NULL,
             samples INTEGER NOT NULL,
             PRIMARY KEY(window_minutes, bucket_start_ms)
@@ -1231,6 +1316,14 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     );
     let _ = conn.execute(
         "ALTER TABLE system_metrics_agg ADD COLUMN disk_iops_sum REAL NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE system_metrics_agg ADD COLUMN network_rx_sum REAL NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE system_metrics_agg ADD COLUMN network_tx_sum REAL NOT NULL DEFAULT 0",
         [],
     );
     Ok(())

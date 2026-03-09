@@ -291,6 +291,53 @@
       chart.update('none');
     }
 
+    function drawMultiLine(canvasId, labels, datasets, valueFormatter, yMin = null, yMax = null) {
+      let chart = chartStore[canvasId];
+      if (!chart) {
+        const canvas = document.getElementById(canvasId);
+        chart = new Chart(canvas, {
+          type: 'line',
+          plugins: [verticalGuidePlugin],
+          data: { labels: [], datasets: [] },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            normalized: true,
+            interaction: { mode: 'index', axis: 'x', intersect: false },
+            plugins: {
+              legend: { display: true, labels: { color: '#93a4c4', boxWidth: 10 } },
+              tooltip: { enabled: true, mode: 'index', intersect: false },
+            },
+            scales: {
+              x: { grid: { color: 'rgba(120,147,198,0.14)' }, ticks: { display: false }, border: { color: 'rgba(120,147,198,0.25)' } },
+              y: { grid: { color: 'rgba(120,147,198,0.14)' }, ticks: { color: '#93a4c4', maxTicksLimit: 4 }, border: { color: 'rgba(120,147,198,0.25)' } },
+            },
+          },
+        });
+        chartStore[canvasId] = chart;
+      }
+
+      chart.data.labels = labels;
+      chart.data.datasets = datasets.map((d) => ({
+        label: d.label,
+        data: d.values,
+        borderColor: d.color,
+        backgroundColor: d.color,
+        pointRadius: 0,
+        pointHoverRadius: 3,
+        borderWidth: 2,
+        tension: 0.25,
+      }));
+      chart.options.scales.y.min = yMin;
+      chart.options.scales.y.max = yMax;
+      chart.options.plugins.tooltip.callbacks = {
+        title: (items) => labels[items?.[0]?.dataIndex ?? 0] || '--:--:--',
+        label: (ctx) => `${ctx.dataset.label}: ${valueFormatter ? valueFormatter(ctx.raw) : ctx.raw}`,
+      };
+      chart.update('none');
+    }
+
     async function loadTrends() {
       const res = await fetch(`/api/trends?minutes=${selectedMinutes}`, { credentials: 'include' });
       if (res.status === 401) {
@@ -302,12 +349,21 @@
       const cpuSeries = buildWindowSeries(points, (p) => p.cpu_percent);
       const memSeries = buildWindowSeries(points, (p) => p.memory_percent);
       const diskSeries = buildWindowSeries(points, (p) => Number(p.disk_iops || 0));
-      const netSeries = buildWindowSeries(points, (p) => (Number(p.network_total_bytes || 0) * 8) / 1_000_000);
+      const netRxSeries = buildWindowSeries(points, (p) => (Number(p.network_rx_bytes || 0) * 8) / 1_000_000);
+      const netTxSeries = buildWindowSeries(points, (p) => (Number(p.network_tx_bytes || 0) * 8) / 1_000_000);
 
       drawLine('cpuTrend', cpuSeries.values, '#54c7ff', cpuSeries.labels, (v) => `${Number(v).toFixed(1)}%`, 0, 100);
       drawLine('memTrend', memSeries.values, '#7b61ff', memSeries.labels, (v) => `${Number(v).toFixed(1)}%`, 0, 100);
       drawLine('diskTrend', diskSeries.values, '#30d188', diskSeries.labels, (v) => `${Number(v).toFixed(0)} IOPS`);
-      drawLine('netTrend', netSeries.values, '#f5b740', netSeries.labels, (v) => `${Number(v).toFixed(2)} Mbps`);
+      drawMultiLine(
+        'netTrend',
+        netRxSeries.labels,
+        [
+          { label: 'RX', values: netRxSeries.values, color: '#54c7ff' },
+          { label: 'TX', values: netTxSeries.values, color: '#f5b740' },
+        ],
+        (v) => `${Number(v).toFixed(2)} Mbps`
+      );
 
       const sampled = data.sampled ? ' · sampled to 96' : '';
       document.getElementById('historyMeta').textContent = `window ${data.requested_minutes}m · available ${data.available_minutes}m · points ${data.returned_points}${sampled}`;

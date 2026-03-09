@@ -36,7 +36,9 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             load_1 REAL NOT NULL,
             load_5 REAL NOT NULL,
             load_15 REAL NOT NULL,
-            container_count INTEGER NOT NULL
+            container_count INTEGER NOT NULL,
+            memory_used_bytes INTEGER NOT NULL DEFAULT 0,
+            memory_total_bytes INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS system_metrics_agg (
@@ -50,6 +52,8 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             network_rx_sum REAL NOT NULL DEFAULT 0,
             network_tx_sum REAL NOT NULL DEFAULT 0,
             container_sum REAL NOT NULL,
+            memory_used_sum REAL NOT NULL DEFAULT 0,
+            memory_total_sum REAL NOT NULL DEFAULT 0,
             samples INTEGER NOT NULL,
             PRIMARY KEY(window_minutes, bucket_start_ms)
         );
@@ -153,6 +157,8 @@ fn ensure_system_metrics_agg_schema(conn: &Connection) -> rusqlite::Result<()> {
             network_rx_sum REAL NOT NULL DEFAULT 0,
             network_tx_sum REAL NOT NULL DEFAULT 0,
             container_sum REAL NOT NULL,
+            memory_used_sum REAL NOT NULL DEFAULT 0,
+            memory_total_sum REAL NOT NULL DEFAULT 0,
             samples INTEGER NOT NULL,
             PRIMARY KEY(window_minutes, bucket_start_ms)
         );
@@ -161,13 +167,13 @@ fn ensure_system_metrics_agg_schema(conn: &Connection) -> rusqlite::Result<()> {
             window_minutes, bucket_start_ms, bucket_end_ms,
             cpu_sum, memory_sum, disk_iops_sum,
             network_sum, network_rx_sum, network_tx_sum,
-            container_sum, samples
+            container_sum, memory_used_sum, memory_total_sum, samples
         )
         SELECT
             window_minutes, bucket_start_ms, bucket_end_ms,
             cpu_sum, memory_sum, COALESCE(disk_iops_sum, 0),
             network_sum, COALESCE(network_rx_sum, 0), COALESCE(network_tx_sum, 0),
-            container_sum, samples
+            container_sum, COALESCE(memory_used_sum, 0), COALESCE(memory_total_sum, 0), samples
         FROM system_metrics_agg_legacy;
 
         DROP TABLE system_metrics_agg_legacy;
@@ -225,6 +231,7 @@ pub(crate) fn rebuild_recent_system_aggregates(conn: &Connection) -> rusqlite::R
             container_sum: f64,
             memory_used_sum: f64,
             memory_total_sum: f64,
+            memory_byte_samples: i64,
             samples: i64,
         }
 
@@ -243,8 +250,13 @@ pub(crate) fn rebuild_recent_system_aggregates(conn: &Connection) -> rusqlite::R
             agg.network_rx_sum += net_rx;
             agg.network_tx_sum += net_tx;
             agg.container_sum += containers;
-            agg.memory_used_sum += mem_used;
-            agg.memory_total_sum += mem_total;
+            // Legacy rows (before memory_used/total_bytes columns existed) have
+            // DEFAULT 0.  Skip them so they don't dilute the real averages.
+            if mem_total > 0.0 {
+                agg.memory_used_sum += mem_used;
+                agg.memory_total_sum += mem_total;
+                agg.memory_byte_samples += 1;
+            }
             agg.samples += 1;
         }
 
@@ -255,6 +267,19 @@ pub(crate) fn rebuild_recent_system_aggregates(conn: &Connection) -> rusqlite::R
         )?;
 
         for (bucket_start_ms, agg) in bucketed {
+            // The API handler divides *_sum by samples to get averages.
+            // If some rows had legacy 0-values for memory bytes, we only
+            // counted real samples in memory_byte_samples.  Scale the sums
+            // so that dividing by `samples` still yields the correct average.
+            let (stored_mem_used, stored_mem_total) = if agg.memory_byte_samples > 0
+                && agg.memory_byte_samples < agg.samples
+            {
+                let scale = agg.samples as f64 / agg.memory_byte_samples as f64;
+                (agg.memory_used_sum * scale, agg.memory_total_sum * scale)
+            } else {
+                (agg.memory_used_sum, agg.memory_total_sum)
+            };
+
             conn.execute(
                 "
                 INSERT OR REPLACE INTO system_metrics_agg(
@@ -275,8 +300,8 @@ pub(crate) fn rebuild_recent_system_aggregates(conn: &Connection) -> rusqlite::R
                     agg.network_rx_sum,
                     agg.network_tx_sum,
                     agg.container_sum,
-                    agg.memory_used_sum,
-                    agg.memory_total_sum,
+                    stored_mem_used,
+                    stored_mem_total,
                     agg.samples,
                 ],
             )?;

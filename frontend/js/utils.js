@@ -32,39 +32,39 @@ function fmtTime(ts) {
 }
 
 function buildWindowSeries(points, valueMapper, windowMinutes) {
-  const labels = new Array(FIXED_TREND_POINTS).fill('');
-  const values = new Array(FIXED_TREND_POINTS).fill(null);
   const source = points || [];
-  if (!source.length || !windowMinutes) return { labels, values };
-
-  const nowTs = Math.floor(Date.now() / 1000);
-  const windowStart = nowTs - windowMinutes * 60;
-  const slotSec = (windowMinutes * 60) / FIXED_TREND_POINTS;
-
-  // Pre-fill time labels for each slot
-  for (let i = 0; i < FIXED_TREND_POINTS; i++) {
-    labels[i] = fmtTime(Math.round(windowStart + (i + 0.5) * slotSec));
+  if (!source.length || !windowMinutes) {
+    return {
+      labels: new Array(FIXED_TREND_POINTS).fill(''),
+      values: new Array(FIXED_TREND_POINTS).fill(null),
+    };
   }
 
-  // Map each data point into the correct time-based slot
-  const counts = new Array(FIXED_TREND_POINTS).fill(0);
-  for (const pt of source) {
-    const ts = pt.ts;
-    if (ts < windowStart || ts > nowTs) continue;
-    let idx = Math.floor((ts - windowStart) / slotSec);
-    if (idx >= FIXED_TREND_POINTS) idx = FIXED_TREND_POINTS - 1;
+  // Expected spacing between consecutive data points (seconds).
+  // If actual gap > 2× this, the program was likely not running — insert a
+  // null break so Chart.js visually splits the line.
+  const expectedSpacingSec = (windowMinutes * 60) / FIXED_TREND_POINTS;
+  const gapThreshold = expectedSpacingSec * 2;
 
-    const val = valueMapper(pt);
-    if (val === null || val === undefined) continue;
+  const labels = [];
+  const values = [];
 
-    if (values[idx] === null) {
-      values[idx] = val;
-      counts[idx] = 1;
-    } else {
-      // Multiple points in same slot → running average
-      values[idx] = (values[idx] * counts[idx] + val) / (counts[idx] + 1);
-      counts[idx]++;
+  for (let i = 0; i < source.length; i++) {
+    const pt = source[i];
+
+    // Detect genuine time gaps between consecutive points
+    if (i > 0) {
+      const gap = pt.ts - source[i - 1].ts;
+      if (gap > gapThreshold) {
+        // Insert a single null to break the line at this gap
+        labels.push('');
+        values.push(null);
+      }
     }
+
+    labels.push(fmtTime(pt.ts));
+    const val = valueMapper(pt);
+    values.push(val === undefined ? null : val);
   }
 
   return { labels, values };

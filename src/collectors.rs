@@ -227,14 +227,8 @@ fn read_linux_total_disk_ops() -> Option<u64> {
 }
 
 fn normalize_memory_to_bytes(value: u64) -> u64 {
-    #[cfg(target_os = "macos")]
-    {
-        value
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        value.saturating_mul(1024)
-    }
+    // sysinfo 0.29+ returns memory in bytes on all platforms
+    value
 }
 
 fn select_disk_usage(system: &System) -> (u64, u64) {
@@ -263,6 +257,20 @@ fn select_disk_usage(system: &System) -> (u64, u64) {
             .max_by_key(|disk| disk.total_space())
         {
             return (primary_disk.total_space(), primary_disk.available_space());
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::path::Path;
+
+        // Prefer the root mount point to avoid summing virtual filesystems
+        if let Some(root_disk) = system
+            .disks()
+            .iter()
+            .find(|disk| disk.mount_point() == Path::new("/"))
+        {
+            return (root_disk.total_space(), root_disk.available_space());
         }
     }
 

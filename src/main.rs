@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     path::Path,
+    process::Command,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -40,6 +41,7 @@ struct AppState {
     latest: Arc<Mutex<Option<MetricsResponse>>>,
     network_baseline: Arc<Mutex<Option<NetworkBaseline>>>,
     disk_baseline: Arc<Mutex<Option<DiskBaseline>>>,
+    disk_xfrs_baseline: Arc<Mutex<Option<DiskXfrsBaseline>>>,
     last_cleanup_day: Arc<Mutex<i64>>,
     sample_interval_secs: u64,
 }
@@ -56,6 +58,12 @@ struct DiskBaseline {
     ts: i64,
     read_total: u64,
     write_total: u64,
+}
+
+#[derive(Clone, Copy)]
+struct DiskXfrsBaseline {
+    ts: i64,
+    xfrs_total: u64,
 }
 
 #[derive(Clone)]
@@ -91,7 +99,7 @@ struct SystemMetrics {
     disk_total_bytes: u64,
     disk_used_bytes: u64,
     disk_percent: f32,
-    disk_io_bytes: u64,
+    disk_iops: f64,
     network_rx_bytes: u64,
     network_tx_bytes: u64,
     process_count: usize,
@@ -133,7 +141,7 @@ struct TrendPoint {
     ts: i64,
     cpu_percent: f32,
     memory_percent: f32,
-    disk_io_bytes: u64,
+    disk_iops: f64,
     network_total_bytes: u64,
     container_count: usize,
 }
@@ -186,6 +194,7 @@ async fn main() {
         latest: Arc::new(Mutex::new(None)),
         network_baseline: Arc::new(Mutex::new(None)),
         disk_baseline: Arc::new(Mutex::new(None)),
+        disk_xfrs_baseline: Arc::new(Mutex::new(None)),
         last_cleanup_day: Arc::new(Mutex::new(-1)),
         sample_interval_secs,
     };
@@ -380,7 +389,7 @@ async fn api_trends(
     let db = state.db.lock().expect("db lock");
     let mut stmt = match db.prepare(
         "
-        SELECT bucket_end_ms, cpu_sum, memory_sum, disk_io_sum, network_sum, container_sum, samples
+        SELECT bucket_end_ms, cpu_sum, memory_sum, disk_iops_sum, network_sum, container_sum, samples
         FROM system_metrics_agg
         WHERE window_minutes = ?1 AND bucket_end_ms >= ?2
         ORDER BY bucket_end_ms ASC
@@ -395,7 +404,7 @@ async fn api_trends(
         let bucket_end_ms: i64 = row.get(0)?;
         let cpu_sum: f64 = row.get(1)?;
         let memory_sum: f64 = row.get(2)?;
-        let disk_io_sum: f64 = row.get(3)?;
+        let disk_iops_sum: f64 = row.get(3)?;
         let network_sum: f64 = row.get(4)?;
         let container_sum: f64 = row.get(5)?;
         let samples: i64 = row.get(6)?;
@@ -404,7 +413,7 @@ async fn api_trends(
             ts: bucket_end_ms / 1000,
             cpu_percent: (cpu_sum / c) as f32,
             memory_percent: (memory_sum / c) as f32,
-            disk_io_bytes: (disk_io_sum / c) as u64,
+            disk_iops: disk_iops_sum / c,
             network_total_bytes: network_sum as u64,
             container_count: (container_sum / c).round() as usize,
         })
@@ -626,7 +635,7 @@ fn collect_system_metrics(state: &AppState) -> SystemMetrics {
         (rx_bps, tx_bps)
     };
 
-    let disk_io_bytes = {
+    let estimated_iops = {
         let mut baseline = state.disk_baseline.lock().expect("disk baseline lock");
         let mut io_bps = 0_u64;
 
@@ -643,8 +652,10 @@ fn collect_system_metrics(state: &AppState) -> SystemMetrics {
             write_total: disk_write_total,
         });
 
-        io_bps
+        (io_bps as f64) / 4096.0
     };
+
+    let disk_iops = true_disk_iops_from_iostat(state, now).unwrap_or(estimated_iops);
 
     let load = system.load_average();
     SystemMetrics {
@@ -655,7 +666,7 @@ fn collect_system_metrics(state: &AppState) -> SystemMetrics {
         disk_total_bytes,
         disk_used_bytes,
         disk_percent,
-        disk_io_bytes,
+        disk_iops,
         network_rx_bytes,
         network_tx_bytes,
         process_count: system.processes().len(),
@@ -663,6 +674,63 @@ fn collect_system_metrics(state: &AppState) -> SystemMetrics {
         load_5: load.five,
         load_15: load.fifteen,
     }
+}
+
+fn true_disk_iops_from_iostat(state: &AppState, now_ts: i64) -> Option<f64> {
+    #[cfg(target_os = "macos")]
+    {
+        let total_xfrs = read_macos_total_xfrs()?;
+        let mut baseline = state
+            .disk_xfrs_baseline
+            .lock()
+            .expect("disk xfrs baseline lock");
+
+        let iops = if let Some(prev) = *baseline {
+            let delta_t = (now_ts - prev.ts).max(1) as f64;
+            let delta_xfrs = total_xfrs.saturating_sub(prev.xfrs_total) as f64;
+            delta_xfrs / delta_t
+        } else {
+            0.0
+        };
+
+        *baseline = Some(DiskXfrsBaseline {
+            ts: now_ts,
+            xfrs_total: total_xfrs,
+        });
+
+        Some(iops)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = state;
+        let _ = now_ts;
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_total_xfrs() -> Option<u64> {
+    let output = Command::new("iostat").args(["-Id"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8(output.stdout).ok()?;
+    for line in text.lines().rev() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 3 {
+            continue;
+        }
+        if cols[0].parse::<f64>().is_ok() {
+            if let Ok(x) = cols[1].parse::<u64>() {
+                return Some(x);
+            }
+            if let Ok(xf) = cols[1].parse::<f64>() {
+                return Some(xf as u64);
+            }
+        }
+    }
+    None
 }
 
 fn normalize_memory_to_bytes(value: u64) -> u64 {
@@ -729,7 +797,7 @@ fn persist_snapshot(state: &AppState, snapshot: &MetricsResponse) {
     let _ = db.execute(
         "
         INSERT INTO system_metrics_history(
-            ts, cpu_percent, memory_percent, disk_percent, disk_io_bytes, network_total_bytes,
+            ts, cpu_percent, memory_percent, disk_percent, disk_iops, network_total_bytes,
             process_count, load_1, load_5, load_15, container_count
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ",
@@ -738,7 +806,7 @@ fn persist_snapshot(state: &AppState, snapshot: &MetricsResponse) {
             snapshot.system.cpu_percent,
             snapshot.system.memory_percent,
             snapshot.system.disk_percent,
-            snapshot.system.disk_io_bytes as i64,
+            snapshot.system.disk_iops,
             snapshot.system.network_rx_bytes + snapshot.system.network_tx_bytes,
             snapshot.system.process_count as i64,
             snapshot.system.load_1,
@@ -794,13 +862,13 @@ fn update_system_aggregates(db: &Connection, snapshot: &MetricsResponse) {
             "
             INSERT INTO system_metrics_agg(
                 window_minutes, bucket_start_ms, bucket_end_ms,
-                cpu_sum, memory_sum, disk_io_sum, network_sum, container_sum, samples
+                cpu_sum, memory_sum, disk_iops_sum, network_sum, container_sum, samples
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
             ON CONFLICT(window_minutes, bucket_start_ms) DO UPDATE SET
                 bucket_end_ms = excluded.bucket_end_ms,
                 cpu_sum = system_metrics_agg.cpu_sum + excluded.cpu_sum,
                 memory_sum = system_metrics_agg.memory_sum + excluded.memory_sum,
-                disk_io_sum = system_metrics_agg.disk_io_sum + excluded.disk_io_sum,
+                disk_iops_sum = system_metrics_agg.disk_iops_sum + excluded.disk_iops_sum,
                 network_sum = system_metrics_agg.network_sum + excluded.network_sum,
                 container_sum = system_metrics_agg.container_sum + excluded.container_sum,
                 samples = system_metrics_agg.samples + 1
@@ -811,7 +879,7 @@ fn update_system_aggregates(db: &Connection, snapshot: &MetricsResponse) {
                 bucket_end_ms,
                 snapshot.system.cpu_percent as f64,
                 snapshot.system.memory_percent as f64,
-                snapshot.system.disk_io_bytes as f64,
+                snapshot.system.disk_iops,
                 network_total as f64,
                 container_count,
             ],
@@ -1110,7 +1178,7 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             cpu_percent REAL NOT NULL,
             memory_percent REAL NOT NULL,
             disk_percent REAL NOT NULL,
-            disk_io_bytes INTEGER NOT NULL DEFAULT 0,
+            disk_iops REAL NOT NULL DEFAULT 0,
             network_total_bytes INTEGER NOT NULL,
             process_count INTEGER NOT NULL,
             load_1 REAL NOT NULL,
@@ -1125,7 +1193,7 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             bucket_end_ms INTEGER NOT NULL,
             cpu_sum REAL NOT NULL,
             memory_sum REAL NOT NULL,
-            disk_io_sum REAL NOT NULL,
+            disk_iops_sum REAL NOT NULL,
             network_sum REAL NOT NULL,
             container_sum REAL NOT NULL,
             samples INTEGER NOT NULL,
@@ -1158,7 +1226,11 @@ fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     )?;
 
     let _ = conn.execute(
-        "ALTER TABLE system_metrics_history ADD COLUMN disk_io_bytes INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE system_metrics_history ADD COLUMN disk_iops REAL NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE system_metrics_agg ADD COLUMN disk_iops_sum REAL NOT NULL DEFAULT 0",
         [],
     );
     Ok(())

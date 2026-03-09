@@ -301,7 +301,7 @@
       const points = data.points || [];
       const cpuSeries = buildWindowSeries(points, (p) => p.cpu_percent);
       const memSeries = buildWindowSeries(points, (p) => p.memory_percent);
-      const diskSeries = buildWindowSeries(points, (p) => Number(p.disk_io_bytes || 0) / 4096);
+      const diskSeries = buildWindowSeries(points, (p) => Number(p.disk_iops || 0));
       const netSeries = buildWindowSeries(points, (p) => (Number(p.network_total_bytes || 0) * 8) / 1_000_000);
 
       drawLine('cpuTrend', cpuSeries.values, '#54c7ff', cpuSeries.labels, (v) => `${Number(v).toFixed(1)}%`, 0, 100);

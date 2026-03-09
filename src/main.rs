@@ -192,6 +192,7 @@ struct ContainerTrendResponse {
 async fn main() {
     let connection = Connection::open("os_pulse.db").expect("open sqlite database");
     init_db(&connection).expect("init database");
+    rebuild_recent_system_aggregates(&connection).expect("rebuild recent aggregates");
 
     let sample_interval_secs = std::env::var("OSP_INTERVAL")
         .ok()
@@ -242,6 +243,105 @@ async fn main() {
         .expect("bind listener");
     println!("OS-Pulse running at http://{}", addr);
     axum::serve(listener, app).await.expect("start server");
+}
+
+fn rebuild_recent_system_aggregates(conn: &Connection) -> rusqlite::Result<()> {
+    let now_sec = now_ts();
+    let now_ms = now_ts_ms();
+    let windows = [15_u32, 60_u32, 360_u32, 1440_u32];
+
+    for minutes in windows {
+        let from_ts = now_sec - (minutes as i64 * 60);
+        let bucket_ms = (minutes as i64 * 60 * 1000) / MAX_TREND_POINTS as i64;
+
+        let mut stmt = conn.prepare(
+            "
+            SELECT ts, cpu_percent, memory_percent, disk_iops,
+                   network_total_bytes, network_rx_bytes, network_tx_bytes, container_count
+            FROM system_metrics_history
+            WHERE ts >= ?1
+            ORDER BY ts ASC
+            ",
+        )?;
+
+        let rows = stmt.query_map(params![from_ts], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, i64>(4)? as f64,
+                row.get::<_, i64>(5).unwrap_or(0) as f64,
+                row.get::<_, i64>(6).unwrap_or(0) as f64,
+                row.get::<_, i64>(7)? as f64,
+            ))
+        })?;
+
+        #[derive(Default)]
+        struct AggRow {
+            bucket_end_ms: i64,
+            cpu_sum: f64,
+            memory_sum: f64,
+            disk_iops_sum: f64,
+            network_sum: f64,
+            network_rx_sum: f64,
+            network_tx_sum: f64,
+            container_sum: f64,
+            samples: i64,
+        }
+
+        let mut bucketed: HashMap<i64, AggRow> = HashMap::new();
+        for row in rows {
+            let (ts, cpu, mem, disk_iops, net_total, net_rx, net_tx, containers) = row?;
+            let sample_ms = ts * 1000;
+            let bucket_start_ms = sample_ms - (sample_ms % bucket_ms);
+            let bucket_end_ms = bucket_start_ms + bucket_ms;
+            let agg = bucketed.entry(bucket_start_ms).or_default();
+            agg.bucket_end_ms = bucket_end_ms;
+            agg.cpu_sum += cpu;
+            agg.memory_sum += mem;
+            agg.disk_iops_sum += disk_iops;
+            agg.network_sum += net_total;
+            agg.network_rx_sum += net_rx;
+            agg.network_tx_sum += net_tx;
+            agg.container_sum += containers;
+            agg.samples += 1;
+        }
+
+        let keep_from_ms = now_ms - (minutes as i64 * 60 * 1000);
+        conn.execute(
+            "DELETE FROM system_metrics_agg WHERE window_minutes = ?1 AND bucket_end_ms >= ?2",
+            params![minutes as i64, keep_from_ms],
+        )?;
+
+        for (bucket_start_ms, agg) in bucketed {
+            conn.execute(
+                "
+                INSERT OR REPLACE INTO system_metrics_agg(
+                    window_minutes, bucket_start_ms, bucket_end_ms,
+                    cpu_sum, memory_sum, disk_iops_sum,
+                    network_sum, network_rx_sum, network_tx_sum,
+                    container_sum, samples
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                ",
+                params![
+                    minutes as i64,
+                    bucket_start_ms,
+                    agg.bucket_end_ms,
+                    agg.cpu_sum,
+                    agg.memory_sum,
+                    agg.disk_iops_sum,
+                    agg.network_sum,
+                    agg.network_rx_sum,
+                    agg.network_tx_sum,
+                    agg.container_sum,
+                    agg.samples,
+                ],
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 async fn root_redirect(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {

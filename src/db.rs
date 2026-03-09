@@ -103,6 +103,22 @@ pub(crate) fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE system_metrics_history ADD COLUMN network_tx_bytes INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE system_metrics_history ADD COLUMN memory_used_bytes INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE system_metrics_history ADD COLUMN memory_total_bytes INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE system_metrics_agg ADD COLUMN memory_used_sum REAL NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE system_metrics_agg ADD COLUMN memory_total_sum REAL NOT NULL DEFAULT 0",
+        [],
+    );
     ensure_system_metrics_agg_schema(conn)?;
     Ok(())
 }
@@ -174,7 +190,8 @@ pub(crate) fn rebuild_recent_system_aggregates(conn: &Connection) -> rusqlite::R
         let mut stmt = conn.prepare(
             "
             SELECT ts, cpu_percent, memory_percent, disk_iops,
-                   network_total_bytes, network_rx_bytes, network_tx_bytes, container_count
+                   network_total_bytes, network_rx_bytes, network_tx_bytes, container_count,
+                   COALESCE(memory_used_bytes, 0), COALESCE(memory_total_bytes, 0)
             FROM system_metrics_history
             WHERE ts >= ?1
             ORDER BY ts ASC
@@ -191,6 +208,8 @@ pub(crate) fn rebuild_recent_system_aggregates(conn: &Connection) -> rusqlite::R
                 row.get::<_, i64>(5).unwrap_or(0) as f64,
                 row.get::<_, i64>(6).unwrap_or(0) as f64,
                 row.get::<_, i64>(7)? as f64,
+                row.get::<_, i64>(8).unwrap_or(0) as f64,
+                row.get::<_, i64>(9).unwrap_or(0) as f64,
             ))
         })?;
 
@@ -204,12 +223,14 @@ pub(crate) fn rebuild_recent_system_aggregates(conn: &Connection) -> rusqlite::R
             network_rx_sum: f64,
             network_tx_sum: f64,
             container_sum: f64,
+            memory_used_sum: f64,
+            memory_total_sum: f64,
             samples: i64,
         }
 
         let mut bucketed: HashMap<i64, AggRow> = HashMap::new();
         for row in rows {
-            let (ts, cpu, mem, disk_iops, net_total, net_rx, net_tx, containers) = row?;
+            let (ts, cpu, mem, disk_iops, net_total, net_rx, net_tx, containers, mem_used, mem_total) = row?;
             let sample_ms = ts * 1000;
             let bucket_start_ms = sample_ms - (sample_ms % bucket_ms);
             let bucket_end_ms = bucket_start_ms + bucket_ms;
@@ -222,6 +243,8 @@ pub(crate) fn rebuild_recent_system_aggregates(conn: &Connection) -> rusqlite::R
             agg.network_rx_sum += net_rx;
             agg.network_tx_sum += net_tx;
             agg.container_sum += containers;
+            agg.memory_used_sum += mem_used;
+            agg.memory_total_sum += mem_total;
             agg.samples += 1;
         }
 
@@ -238,8 +261,8 @@ pub(crate) fn rebuild_recent_system_aggregates(conn: &Connection) -> rusqlite::R
                     window_minutes, bucket_start_ms, bucket_end_ms,
                     cpu_sum, memory_sum, disk_iops_sum,
                     network_sum, network_rx_sum, network_tx_sum,
-                    container_sum, samples
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                    container_sum, memory_used_sum, memory_total_sum, samples
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                 ",
                 params![
                     minutes as i64,
@@ -252,6 +275,8 @@ pub(crate) fn rebuild_recent_system_aggregates(conn: &Connection) -> rusqlite::R
                     agg.network_rx_sum,
                     agg.network_tx_sum,
                     agg.container_sum,
+                    agg.memory_used_sum,
+                    agg.memory_total_sum,
                     agg.samples,
                 ],
             )?;
@@ -268,8 +293,9 @@ pub(crate) fn persist_snapshot(state: &AppState, snapshot: &MetricsResponse) {
         INSERT INTO system_metrics_history(
             ts, cpu_percent, memory_percent, disk_percent, disk_iops,
             network_total_bytes, network_rx_bytes, network_tx_bytes,
-            process_count, load_1, load_5, load_15, container_count
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            process_count, load_1, load_5, load_15, container_count,
+            memory_used_bytes, memory_total_bytes
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
         ",
         params![
             snapshot.ts,
@@ -285,6 +311,8 @@ pub(crate) fn persist_snapshot(state: &AppState, snapshot: &MetricsResponse) {
             snapshot.system.load_5,
             snapshot.system.load_15,
             snapshot.containers.len() as i64,
+            snapshot.system.memory_used_bytes as i64,
+            snapshot.system.memory_total_bytes as i64,
         ],
     );
 
@@ -325,6 +353,8 @@ fn update_system_aggregates(db: &Connection, snapshot: &MetricsResponse) {
     let network_tx = snapshot.system.network_tx_bytes;
     let network_total = network_rx + network_tx;
     let container_count = snapshot.containers.len() as f64;
+    let mem_used = snapshot.system.memory_used_bytes as f64;
+    let mem_total = snapshot.system.memory_total_bytes as f64;
 
     for minutes in windows {
         let bucket_ms = (minutes as i64 * 60 * 1000) / MAX_TREND_POINTS as i64;
@@ -338,8 +368,8 @@ fn update_system_aggregates(db: &Connection, snapshot: &MetricsResponse) {
                 window_minutes, bucket_start_ms, bucket_end_ms,
                 cpu_sum, memory_sum, disk_iops_sum,
                 network_sum, network_rx_sum, network_tx_sum,
-                container_sum, samples
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1)
+                container_sum, memory_used_sum, memory_total_sum, samples
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1)
             ON CONFLICT(window_minutes, bucket_start_ms) DO UPDATE SET
                 bucket_end_ms = excluded.bucket_end_ms,
                 cpu_sum = system_metrics_agg.cpu_sum + excluded.cpu_sum,
@@ -349,6 +379,8 @@ fn update_system_aggregates(db: &Connection, snapshot: &MetricsResponse) {
                 network_rx_sum = system_metrics_agg.network_rx_sum + excluded.network_rx_sum,
                 network_tx_sum = system_metrics_agg.network_tx_sum + excluded.network_tx_sum,
                 container_sum = system_metrics_agg.container_sum + excluded.container_sum,
+                memory_used_sum = system_metrics_agg.memory_used_sum + excluded.memory_used_sum,
+                memory_total_sum = system_metrics_agg.memory_total_sum + excluded.memory_total_sum,
                 samples = system_metrics_agg.samples + 1
             ",
             params![
@@ -362,6 +394,8 @@ fn update_system_aggregates(db: &Connection, snapshot: &MetricsResponse) {
                 network_rx as f64,
                 network_tx as f64,
                 container_count,
+                mem_used,
+                mem_total,
             ],
         );
 

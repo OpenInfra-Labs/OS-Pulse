@@ -79,7 +79,7 @@ function drawLine(canvasId, values, color, labels, valueFormatter, yMin = null, 
   chart.options.scales.y.max = yMax;
   chart.options.plugins.tooltip.callbacks = {
     title: (items) => labels[items?.[0]?.dataIndex ?? 0] || '--:--:--',
-    label: (ctx) => valueFormatter ? valueFormatter(ctx.raw) : `${ctx.raw}`,
+    label: (ctx) => valueFormatter ? valueFormatter(ctx.raw, ctx.dataIndex) : `${ctx.raw}`,
   };
   chart.update('none');
 }

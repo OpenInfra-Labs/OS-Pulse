@@ -65,12 +65,20 @@ async function loadTrends() {
   const win = data.requested_minutes || selectedMinutes;
   const cpuSeries  = buildWindowSeries(points, (p) => p.cpu_percent, win);
   const memSeries  = buildWindowSeries(points, (p) => p.memory_percent, win);
+  const memUsedSeries = buildWindowSeries(points, (p) => p.memory_used_bytes, win);
+  const memTotalSeries = buildWindowSeries(points, (p) => p.memory_total_bytes, win);
   const diskSeries = buildWindowSeries(points, (p) => Number(p.disk_iops || 0), win);
   const netRxSeries = buildWindowSeries(points, (p) => (Number(p.network_rx_bytes || 0) * 8) / 1_000_000, win);
   const netTxSeries = buildWindowSeries(points, (p) => (Number(p.network_tx_bytes || 0) * 8) / 1_000_000, win);
 
   drawLine('cpuTrend',  cpuSeries.values,  '#54c7ff', cpuSeries.labels,  (v) => `${Number(v).toFixed(1)}%`, 0, 100);
-  drawLine('memTrend',  memSeries.values,  '#7b61ff', memSeries.labels,  (v) => `${Number(v).toFixed(1)}%`, 0, 100);
+  drawLine('memTrend',  memSeries.values,  '#7b61ff', memSeries.labels,  (v, idx) => {
+    const pct = `${Number(v).toFixed(1)}%`;
+    const used = memUsedSeries.values[idx];
+    const total = memTotalSeries.values[idx];
+    if (used && total) return `${pct}  (${fmtBytes(used)} / ${fmtBytes(total)})`;
+    return pct;
+  }, 0, 100);
   drawLine('diskTrend', diskSeries.values, '#30d188', diskSeries.labels, (v) => `${Number(v).toFixed(0)} IOPS`);
   drawMultiLine(
     'netTrend',

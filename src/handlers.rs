@@ -213,7 +213,8 @@ pub(crate) async fn api_trends(
     let mut stmt = match db.prepare(
         "
         SELECT bucket_end_ms, cpu_sum, memory_sum, disk_iops_sum,
-               network_sum, network_rx_sum, network_tx_sum, container_sum, samples
+               network_sum, network_rx_sum, network_tx_sum, container_sum, samples,
+               COALESCE(memory_used_sum, 0), COALESCE(memory_total_sum, 0)
         FROM system_metrics_agg
         WHERE window_minutes = ?1 AND bucket_end_ms >= ?2
         ORDER BY bucket_end_ms ASC
@@ -236,6 +237,8 @@ pub(crate) async fn api_trends(
             let network_tx_sum: f64 = row.get(6)?;
             let container_sum: f64 = row.get(7)?;
             let samples: i64 = row.get(8)?;
+            let memory_used_sum: f64 = row.get(9)?;
+            let memory_total_sum: f64 = row.get(10)?;
             let c = samples.max(1) as f64;
             let avg_net = (network_sum / c) as u64;
             let (rx_avg, tx_avg) = if network_rx_sum == 0.0 && network_tx_sum == 0.0 {
@@ -247,6 +250,8 @@ pub(crate) async fn api_trends(
                 ts: bucket_end_ms / 1000,
                 cpu_percent: (cpu_sum / c) as f32,
                 memory_percent: (memory_sum / c) as f32,
+                memory_used_bytes: (memory_used_sum / c) as u64,
+                memory_total_bytes: (memory_total_sum / c) as u64,
                 disk_iops: disk_iops_sum / c,
                 network_rx_bytes: rx_avg,
                 network_tx_bytes: tx_avg,

@@ -124,6 +124,8 @@ pub(crate) struct TrendPoint {
     pub(crate) ts: i64,
     pub(crate) cpu_percent: f32,
     pub(crate) memory_percent: f32,
+    pub(crate) memory_used_bytes: u64,
+    pub(crate) memory_total_bytes: u64,
     pub(crate) disk_iops: f64,
     pub(crate) network_rx_bytes: u64,
     pub(crate) network_tx_bytes: u64,

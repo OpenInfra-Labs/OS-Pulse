@@ -858,21 +858,22 @@ fn downsample_points<T>(points: Vec<T>, max_points: usize) -> Vec<T> {
         return points;
     }
 
-    let len = points.len();
-    let step = (len as f64 - 1.0) / (max_points as f64 - 1.0);
-    let mut sampled = Vec::with_capacity(max_points);
-    let mut iter = points.into_iter();
-    let mut buffer: Vec<Option<T>> = iter.by_ref().map(Some).collect();
-
-    for i in 0..max_points {
-        let idx = ((i as f64) * step).round() as usize;
-        let idx = idx.min(len - 1);
-        if let Some(item) = buffer[idx].take() {
-            sampled.push(item);
-        }
+    if max_points == 1 {
+        return points.into_iter().take(1).collect();
     }
 
-    sampled
+    let len = points.len();
+    let mut keep = vec![false; len];
+    for i in 0..max_points {
+        let idx = i * (len - 1) / (max_points - 1);
+        keep[idx] = true;
+    }
+
+    points
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, point)| if keep[idx] { Some(point) } else { None })
+        .collect()
 }
 
 fn init_db(conn: &Connection) -> rusqlite::Result<()> {

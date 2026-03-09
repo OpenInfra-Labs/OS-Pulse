@@ -86,6 +86,12 @@ pub(crate) async fn api_auth_setup(
     if payload.username.trim().is_empty() || payload.password.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "Username and password are required");
     }
+    if payload.password.len() < 6 {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Password must be at least 6 characters",
+        );
+    }
     if !state_needs_setup(&state) {
         return json_error(StatusCode::CONFLICT, "Account already initialized");
     }

@@ -54,6 +54,7 @@
         subtitle.textContent = 'First launch detected. Create an administrator account.';
         submitBtn.textContent = 'Create Account';
         tip.textContent = 'This step appears only once. All future access requires login.';
+        document.getElementById('password').autocomplete = 'new-password';
       } else {
         subtitle.textContent = 'Sign in to access system and container monitoring.';
         submitBtn.textContent = 'Login';
@@ -70,6 +71,10 @@
       };
       if (!payload.username || !payload.password) {
         error.textContent = 'Username and password are required.';
+        return;
+      }
+      if (mode === 'setup' && payload.password.length < 6) {
+        error.textContent = 'Password must be at least 6 characters.';
         return;
       }
       const endpoint = mode === 'setup' ? '/api/auth/setup' : '/api/auth/login';

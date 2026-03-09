@@ -104,15 +104,12 @@ function syncContainerSelect(available, selected) {
   }
 
   select.disabled = false;
-  const current = selected || available[0];
-  if (selectedContainer && available.includes(selectedContainer)) {
-    select.value = selectedContainer;
-  } else {
-    selectedContainer = current;
+  if (!selectedContainer || !available.includes(selectedContainer)) {
+    selectedContainer = selected || available[0];
   }
 
   select.innerHTML = available
-    .map((name) => `<option value="${name}">${name}</option>`)
+    .map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)
     .join('');
   select.value = selectedContainer;
 }
@@ -147,8 +144,7 @@ function bindRangeButtons() {
     selectedMinutes = Number(btn.dataset.min || 60);
     for (const b of group.querySelectorAll('.range-btn')) b.classList.remove('active');
     btn.classList.add('active');
-    await loadTrends();
-    await loadContainerTrends();
+    await Promise.all([loadTrends(), loadContainerTrends()]);
   });
 }
 
@@ -169,10 +165,13 @@ document.getElementById('logoutBtn').addEventListener('click', async () => {
 
 async function pulse() {
   await Promise.all([loadMetrics(), loadTrends(), loadContainerTrends()]);
-  fetch('/api/action', { method: 'POST', credentials: 'include' });
+}
+
+async function scheduleNextPulse() {
+  await pulse();
+  setTimeout(scheduleNextPulse, 3000);
 }
 
 bindRangeButtons();
 bindContainerSelect();
-loadMe().then(() => pulse());
-setInterval(pulse, 3000);
+loadMe().then(() => scheduleNextPulse());

@@ -407,7 +407,7 @@ async fn api_trends(
     };
 
     let sampled = raw_len > MAX_TREND_POINTS;
-    points = downsample_points(points, MAX_TREND_POINTS);
+    points = downsample_trend_points(points, MAX_TREND_POINTS);
     let returned_points = points.len();
 
     Json(TrendResponse {
@@ -507,7 +507,7 @@ async fn api_container_trends(
         }
     }
 
-    points = downsample_points(points, MAX_TREND_POINTS);
+    points = downsample_container_trend_points(points, MAX_TREND_POINTS);
 
     Json(ContainerTrendResponse {
         selected,
@@ -875,26 +875,154 @@ fn split_image(image: &str) -> (String, String) {
     }
 }
 
-fn downsample_points<T>(points: Vec<T>, max_points: usize) -> Vec<T> {
+fn downsample_trend_points(points: Vec<TrendPoint>, max_points: usize) -> Vec<TrendPoint> {
     if points.len() <= max_points || max_points == 0 {
         return points;
     }
 
-    if max_points == 1 {
-        return points.into_iter().take(1).collect();
+    let first_ts = points.first().map(|p| p.ts).unwrap_or(0);
+    let last_ts = points.last().map(|p| p.ts).unwrap_or(first_ts);
+    if first_ts >= last_ts {
+        return points.into_iter().take(max_points).collect();
     }
 
-    let len = points.len();
-    let mut keep = vec![false; len];
-    for i in 0..max_points {
-        let idx = i * (len - 1) / (max_points - 1);
-        keep[idx] = true;
+    let span = (last_ts - first_ts + 1) as i128;
+    let bucket_count = max_points;
+
+    #[derive(Clone, Copy)]
+    struct TrendAgg {
+        ts: i64,
+        cpu: f64,
+        mem: f64,
+        disk: f64,
+        net: f64,
+        containers: f64,
+        count: u32,
     }
 
-    points
+    let mut buckets: Vec<Option<TrendAgg>> = vec![None; bucket_count];
+    for point in points {
+        let offset = (point.ts - first_ts) as i128;
+        let mut idx = ((offset * bucket_count as i128) / span) as usize;
+        if idx >= bucket_count {
+            idx = bucket_count - 1;
+        }
+
+        match &mut buckets[idx] {
+            Some(agg) => {
+                agg.ts = point.ts;
+                agg.cpu += point.cpu_percent as f64;
+                agg.mem += point.memory_percent as f64;
+                agg.disk += point.disk_percent as f64;
+                agg.net += point.network_total_bytes as f64;
+                agg.containers += point.container_count as f64;
+                agg.count += 1;
+            }
+            None => {
+                buckets[idx] = Some(TrendAgg {
+                    ts: point.ts,
+                    cpu: point.cpu_percent as f64,
+                    mem: point.memory_percent as f64,
+                    disk: point.disk_percent as f64,
+                    net: point.network_total_bytes as f64,
+                    containers: point.container_count as f64,
+                    count: 1,
+                });
+            }
+        }
+    }
+
+    buckets
         .into_iter()
-        .enumerate()
-        .filter_map(|(idx, point)| if keep[idx] { Some(point) } else { None })
+        .flatten()
+        .map(|agg| {
+            let c = agg.count.max(1) as f64;
+            TrendPoint {
+                ts: agg.ts,
+                cpu_percent: (agg.cpu / c) as f32,
+                memory_percent: (agg.mem / c) as f32,
+                disk_percent: (agg.disk / c) as f32,
+                network_total_bytes: (agg.net / c) as u64,
+                container_count: (agg.containers / c).round() as usize,
+            }
+        })
+        .collect()
+}
+
+fn downsample_container_trend_points(
+    points: Vec<ContainerTrendPoint>,
+    max_points: usize,
+) -> Vec<ContainerTrendPoint> {
+    if points.len() <= max_points || max_points == 0 {
+        return points;
+    }
+
+    let first_ts = points.first().map(|p| p.ts).unwrap_or(0);
+    let last_ts = points.last().map(|p| p.ts).unwrap_or(first_ts);
+    if first_ts >= last_ts {
+        return points.into_iter().take(max_points).collect();
+    }
+
+    let span = (last_ts - first_ts + 1) as i128;
+    let bucket_count = max_points;
+
+    #[derive(Clone, Copy)]
+    struct ContainerAgg {
+        ts: i64,
+        cpu: f64,
+        mem_used: f64,
+        mem_limit: f64,
+        net: f64,
+        disk: f64,
+        count: u32,
+    }
+
+    let mut buckets: Vec<Option<ContainerAgg>> = vec![None; bucket_count];
+    for point in points {
+        let offset = (point.ts - first_ts) as i128;
+        let mut idx = ((offset * bucket_count as i128) / span) as usize;
+        if idx >= bucket_count {
+            idx = bucket_count - 1;
+        }
+
+        match &mut buckets[idx] {
+            Some(agg) => {
+                agg.ts = point.ts;
+                agg.cpu += point.cpu_percent;
+                agg.mem_used += point.memory_used_bytes as f64;
+                agg.mem_limit += point.memory_limit_bytes as f64;
+                agg.net += point.network_total_bytes as f64;
+                agg.disk += point.disk_io_total_bytes as f64;
+                agg.count += 1;
+            }
+            None => {
+                buckets[idx] = Some(ContainerAgg {
+                    ts: point.ts,
+                    cpu: point.cpu_percent,
+                    mem_used: point.memory_used_bytes as f64,
+                    mem_limit: point.memory_limit_bytes as f64,
+                    net: point.network_total_bytes as f64,
+                    disk: point.disk_io_total_bytes as f64,
+                    count: 1,
+                });
+            }
+        }
+    }
+
+    buckets
+        .into_iter()
+        .flatten()
+        .map(|agg| {
+            let c = agg.count.max(1) as f64;
+            ContainerTrendPoint {
+                ts: agg.ts,
+                cpu_percent: agg.cpu / c,
+                memory_used_bytes: (agg.mem_used / c) as u64,
+                memory_limit_bytes: (agg.mem_limit / c) as u64,
+                network_total_bytes: (agg.net / c) as u64,
+                disk_io_total_bytes: (agg.disk / c) as u64,
+            }
+        })
         .collect()
 }
 

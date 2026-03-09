@@ -51,6 +51,7 @@ function ensureLineChart(canvasId, color) {
         pointHoverRadius: 3,
         borderWidth: 2,
         tension: 0.25,
+        spanGaps: false,
       }],
     },
     options: {
@@ -117,6 +118,7 @@ function drawMultiLine(canvasId, labels, datasets, valueFormatter, yMin = null, 
     pointHoverRadius: 3,
     borderWidth: 2,
     tension: 0.25,
+    spanGaps: false,
   }));
   chart.options.scales.y.min = yMin;
   chart.options.scales.y.max = yMax;

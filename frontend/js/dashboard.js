@@ -62,11 +62,12 @@ async function loadTrends() {
   const data = await res.json();
   const points = data.points || [];
 
-  const cpuSeries  = buildWindowSeries(points, (p) => p.cpu_percent);
-  const memSeries  = buildWindowSeries(points, (p) => p.memory_percent);
-  const diskSeries = buildWindowSeries(points, (p) => Number(p.disk_iops || 0));
-  const netRxSeries = buildWindowSeries(points, (p) => (Number(p.network_rx_bytes || 0) * 8) / 1_000_000);
-  const netTxSeries = buildWindowSeries(points, (p) => (Number(p.network_tx_bytes || 0) * 8) / 1_000_000);
+  const win = data.requested_minutes || selectedMinutes;
+  const cpuSeries  = buildWindowSeries(points, (p) => p.cpu_percent, win);
+  const memSeries  = buildWindowSeries(points, (p) => p.memory_percent, win);
+  const diskSeries = buildWindowSeries(points, (p) => Number(p.disk_iops || 0), win);
+  const netRxSeries = buildWindowSeries(points, (p) => (Number(p.network_rx_bytes || 0) * 8) / 1_000_000, win);
+  const netTxSeries = buildWindowSeries(points, (p) => (Number(p.network_tx_bytes || 0) * 8) / 1_000_000, win);
 
   drawLine('cpuTrend',  cpuSeries.values,  '#54c7ff', cpuSeries.labels,  (v) => `${Number(v).toFixed(1)}%`, 0, 100);
   drawLine('memTrend',  memSeries.values,  '#7b61ff', memSeries.labels,  (v) => `${Number(v).toFixed(1)}%`, 0, 100);
@@ -116,12 +117,12 @@ async function loadContainerTrends() {
   syncContainerSelect(data.available || [], data.selected || '');
 
   const points = data.points || [];
-  const cpuSeries = buildWindowSeries(points, (p) => p.cpu_percent);
+  const cpuSeries = buildWindowSeries(points, (p) => p.cpu_percent, selectedMinutes);
   const memSeries = buildWindowSeries(points, (p) => {
     if (!p.memory_limit_bytes) return null;
     return (p.memory_used_bytes / p.memory_limit_bytes) * 100;
-  });
-  const ioSeries = buildWindowSeries(points, (p) => p.network_total_bytes + p.disk_io_total_bytes);
+  }, selectedMinutes);
+  const ioSeries = buildWindowSeries(points, (p) => p.network_total_bytes + p.disk_io_total_bytes, selectedMinutes);
 
   drawLine('containerCpuTrend', cpuSeries.values, '#54c7ff', cpuSeries.labels, (v) => `${Number(v).toFixed(1)}%`, 0, 100);
   drawLine('containerMemTrend', memSeries.values, '#7b61ff', memSeries.labels, (v) => `${Number(v).toFixed(1)}%`, 0, 100);

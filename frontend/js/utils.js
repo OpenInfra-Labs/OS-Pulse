@@ -31,14 +31,40 @@ function fmtTime(ts) {
   return new Date(ts * 1000).toLocaleTimeString('en-GB', { hour12: false });
 }
 
-function buildWindowSeries(points, valueMapper) {
+function buildWindowSeries(points, valueMapper, windowMinutes) {
   const labels = new Array(FIXED_TREND_POINTS).fill('');
   const values = new Array(FIXED_TREND_POINTS).fill(null);
-  const source = (points || []).slice(0, FIXED_TREND_POINTS);
+  const source = points || [];
+  if (!source.length || !windowMinutes) return { labels, values };
 
-  for (let idx = 0; idx < source.length; idx++) {
-    labels[idx] = fmtTime(source[idx].ts);
-    values[idx] = valueMapper(source[idx]);
+  const nowTs = Math.floor(Date.now() / 1000);
+  const windowStart = nowTs - windowMinutes * 60;
+  const slotSec = (windowMinutes * 60) / FIXED_TREND_POINTS;
+
+  // Pre-fill time labels for each slot
+  for (let i = 0; i < FIXED_TREND_POINTS; i++) {
+    labels[i] = fmtTime(Math.round(windowStart + (i + 0.5) * slotSec));
+  }
+
+  // Map each data point into the correct time-based slot
+  const counts = new Array(FIXED_TREND_POINTS).fill(0);
+  for (const pt of source) {
+    const ts = pt.ts;
+    if (ts < windowStart || ts > nowTs) continue;
+    let idx = Math.floor((ts - windowStart) / slotSec);
+    if (idx >= FIXED_TREND_POINTS) idx = FIXED_TREND_POINTS - 1;
+
+    const val = valueMapper(pt);
+    if (val === null || val === undefined) continue;
+
+    if (values[idx] === null) {
+      values[idx] = val;
+      counts[idx] = 1;
+    } else {
+      // Multiple points in same slot → running average
+      values[idx] = (values[idx] * counts[idx] + val) / (counts[idx] + 1);
+      counts[idx]++;
+    }
   }
 
   return { labels, values };

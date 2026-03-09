@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
+    path::Path,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -515,20 +516,15 @@ fn collect_system_metrics() -> SystemMetrics {
     let mut system = System::new_all();
     system.refresh_all();
 
-    let memory_total_bytes = system.total_memory() * 1024;
-    let memory_used_bytes = system.used_memory() * 1024;
+    let memory_total_bytes = normalize_memory_to_bytes(system.total_memory());
+    let memory_used_bytes = normalize_memory_to_bytes(system.used_memory());
     let memory_percent = if memory_total_bytes == 0 {
         0.0
     } else {
         (memory_used_bytes as f32 / memory_total_bytes as f32) * 100.0
     };
 
-    let mut disk_total_bytes = 0_u64;
-    let mut disk_available_bytes = 0_u64;
-    for disk in system.disks() {
-        disk_total_bytes += disk.total_space();
-        disk_available_bytes += disk.available_space();
-    }
+    let (disk_total_bytes, disk_available_bytes) = select_disk_usage(&system);
     let disk_used_bytes = disk_total_bytes.saturating_sub(disk_available_bytes);
     let disk_percent = if disk_total_bytes == 0 {
         0.0
@@ -539,8 +535,8 @@ fn collect_system_metrics() -> SystemMetrics {
     let mut network_rx_bytes = 0_u64;
     let mut network_tx_bytes = 0_u64;
     for (_, data) in system.networks() {
-        network_rx_bytes += data.received();
-        network_tx_bytes += data.transmitted();
+        network_rx_bytes += data.total_received();
+        network_tx_bytes += data.total_transmitted();
     }
 
     let load = system.load_average();
@@ -559,6 +555,38 @@ fn collect_system_metrics() -> SystemMetrics {
         load_5: load.five,
         load_15: load.fifteen,
     }
+}
+
+fn normalize_memory_to_bytes(value: u64) -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        value
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        value.saturating_mul(1024)
+    }
+}
+
+fn select_disk_usage(system: &System) -> (u64, u64) {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(root_disk) = system
+            .disks()
+            .iter()
+            .find(|disk| disk.mount_point() == Path::new("/"))
+        {
+            return (root_disk.total_space(), root_disk.available_space());
+        }
+    }
+
+    let mut disk_total_bytes = 0_u64;
+    let mut disk_available_bytes = 0_u64;
+    for disk in system.disks() {
+        disk_total_bytes += disk.total_space();
+        disk_available_bytes += disk.available_space();
+    }
+    (disk_total_bytes, disk_available_bytes)
 }
 
 async fn collect_metrics_snapshot() -> MetricsResponse {

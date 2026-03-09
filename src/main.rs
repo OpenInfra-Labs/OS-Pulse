@@ -40,6 +40,7 @@ struct AppState {
     latest: Arc<Mutex<Option<MetricsResponse>>>,
     network_baseline: Arc<Mutex<Option<NetworkBaseline>>>,
     disk_baseline: Arc<Mutex<Option<DiskBaseline>>>,
+    last_cleanup_day: Arc<Mutex<i64>>,
     sample_interval_secs: u64,
 }
 
@@ -185,6 +186,7 @@ async fn main() {
         latest: Arc::new(Mutex::new(None)),
         network_baseline: Arc::new(Mutex::new(None)),
         disk_baseline: Arc::new(Mutex::new(None)),
+        last_cleanup_day: Arc::new(Mutex::new(-1)),
         sample_interval_secs,
     };
 
@@ -826,10 +828,33 @@ async fn background_sampler(state: AppState) {
     loop {
         let snapshot = collect_metrics_snapshot(&state).await;
         persist_snapshot(&state, &snapshot);
+        maybe_cleanup_raw_history(&state, snapshot.ts);
         *state.latest.lock().expect("latest lock") = Some(snapshot);
 
         tokio::time::sleep(Duration::from_secs(state.sample_interval_secs)).await;
     }
+}
+
+fn maybe_cleanup_raw_history(state: &AppState, now_ts: i64) {
+    let current_day = now_ts / 86_400;
+    {
+        let mut last_day = state.last_cleanup_day.lock().expect("cleanup day lock");
+        if *last_day == current_day {
+            return;
+        }
+        *last_day = current_day;
+    }
+
+    let keep_from = now_ts - 24 * 60 * 60;
+    let db = state.db.lock().expect("db lock");
+    let _ = db.execute(
+        "DELETE FROM system_metrics_history WHERE ts < ?1",
+        params![keep_from],
+    );
+    let _ = db.execute(
+        "DELETE FROM container_metrics_history WHERE ts < ?1",
+        params![keep_from],
+    );
 }
 
 async fn collect_container_metrics() -> Vec<ContainerMetrics> {

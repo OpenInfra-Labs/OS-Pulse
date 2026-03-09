@@ -38,6 +38,7 @@ async fn main() {
         latest: Arc::new(Mutex::new(None)),
         network_baseline: Arc::new(Mutex::new(None)),
         disk_baseline: Arc::new(Mutex::new(None)),
+        #[cfg(target_os = "macos")]
         disk_xfrs_baseline: Arc::new(Mutex::new(None)),
         #[cfg(target_os = "linux")]
         disk_ops_baseline: Arc::new(Mutex::new(None)),

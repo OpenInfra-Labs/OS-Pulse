@@ -1,4 +1,6 @@
+#[cfg(target_os = "macos")]
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::Duration;
 

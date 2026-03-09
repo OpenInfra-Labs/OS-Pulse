@@ -13,6 +13,7 @@ pub(crate) struct AppState {
     pub(crate) latest: Arc<Mutex<Option<MetricsResponse>>>,
     pub(crate) network_baseline: Arc<Mutex<Option<NetworkBaseline>>>,
     pub(crate) disk_baseline: Arc<Mutex<Option<DiskBaseline>>>,
+    #[cfg(target_os = "macos")]
     pub(crate) disk_xfrs_baseline: Arc<Mutex<Option<DiskXfrsBaseline>>>,
     #[cfg(target_os = "linux")]
     pub(crate) disk_ops_baseline: Arc<Mutex<Option<DiskOpsBaseline>>>,
@@ -34,6 +35,7 @@ pub(crate) struct DiskBaseline {
     pub(crate) write_total: u64,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
 pub(crate) struct DiskXfrsBaseline {
     pub(crate) ts: i64,

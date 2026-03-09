@@ -45,12 +45,10 @@ It runs equally well **on the host** or **inside a container**.
 - Low overhead — typically < 1 % CPU and < 20 MB RSS
 
 ### Historical Data Storage
-- **SQLite** — zero-config, embedded (default)
-- **InfluxDB** — for large-scale or clustered setups
-- **TimescaleDB** — PostgreSQL extension for time-series workloads
-- Configurable retention policies
-- Supports trend analysis and cross-period comparison
-- Built-in SQLite history tables for system and container snapshots
+- **SQLite** — zero-config, embedded, single-file database
+- Built-in history tables for system and container metric snapshots
+- Aggregated trend buckets (15 m / 1 h / 6 h / 24 h) with automatic roll-up
+- Auto-cleanup of raw history older than 48 hours
 
 ### Web Dashboard
 - Clean, responsive single-page UI
@@ -82,9 +80,9 @@ It runs equally well **on the host** or **inside a container**.
 │                                             │
 │  ┌──────────┐  ┌──────────┐  ┌───────────┐ │
 │  │ System   │  │Container │  │  Storage   │ │
-│  │ Collector│  │ Collector│  │ (SQLite /  │ │
-│  │ (sysinfo)│  │ (Docker) │  │ InfluxDB / │ │
-│  └────┬─────┘  └────┬─────┘  │TimescaleDB)│ │
+│  │ Collector│  │ Collector│  │  (SQLite)  │ │
+│  │ (sysinfo)│  │ (Docker) │  │            │ │
+│  └────┬─────┘  └────┬─────┘  │            │ │
 │       │              │        └─────┬──────┘ │
 │       └──────┬───────┘              │        │
 │              ▼                      │        │
@@ -124,31 +122,33 @@ The binary will be at `target/release/os-pulse`.
 ### Run
 
 ```bash
-# Start with default settings (SQLite, 1s interval, port 3000)
+# Start with default settings (SQLite, 1s sampling, port 3000)
 ./target/release/os-pulse
 
-# Custom configuration
-./target/release/os-pulse \
-  --interval 2 \
-  --port 8080 \
-  --storage influxdb \
-  --influxdb-url http://localhost:8086
+# Custom sampling interval (seconds)
+OSP_INTERVAL=2 ./target/release/os-pulse
 ```
 
 Then open **http://localhost:3000** in your browser.
 
 On first access, you will be redirected to the login page and asked to create the initial account.
 
+> **Note:** To monitor Docker containers, make sure the user running OS-Pulse has access to the Docker socket (`/var/run/docker.sock`).
+
 ### Run with Docker
 
+There is no pre-built image yet. Build from source using the included `Dockerfile`:
+
 ```bash
+# Build the image
+docker build -t os-pulse .
+
+# Run the container
 docker run -d \
   --name os-pulse \
   -p 3000:3000 \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v /proc:/host/proc:ro \
-  -v /sys:/host/sys:ro \
-  ghcr.io/openinfra-labs/os-pulse:latest
+  os-pulse
 ```
 
 ### Docker Compose
@@ -157,61 +157,41 @@ docker run -d \
 version: "3.8"
 services:
   os-pulse:
-    image: ghcr.io/openinfra-labs/os-pulse:latest
+    build: .
     ports:
       - "3000:3000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - os-pulse-data:/data
+    environment:
+      - OSP_INTERVAL=1
     restart: unless-stopped
+```
 
-volumes:
-  os-pulse-data:
+### Quick Try with a Rust Container
+
+If you don't have the Rust toolchain installed locally, you can build and run inside a Rust container:
+
+```bash
+docker run -it --rm \
+  -p 3000:3000 \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v "$(pwd)":/app \
+  -w /app \
+  rust:1.85-bookworm \
+  bash -c "cargo build --release && ./target/release/os-pulse"
 ```
 
 ---
 
 ## Configuration
 
-OS-Pulse can be configured via CLI flags, environment variables, or a TOML config file.
+OS-Pulse is configured via environment variables.
 
-| Parameter | CLI Flag | Env Var | Default | Description |
-|-----------|----------|---------|---------|-------------|
-| Sampling interval | `--interval` | `OSP_INTERVAL` | `1` | Metric collection interval in seconds |
-| HTTP port | `--port` | `OSP_PORT` | `3000` | Web dashboard port |
-| Storage backend | `--storage` | `OSP_STORAGE` | `sqlite` | `sqlite`, `influxdb`, or `timescaledb` |
-| Data directory | `--data-dir` | `OSP_DATA_DIR` | `./data` | Directory for SQLite database files |
-| Retention | `--retention` | `OSP_RETENTION` | `7d` | How long to keep historical data |
-| Log level | `--log-level` | `OSP_LOG_LEVEL` | `info` | `trace`, `debug`, `info`, `warn`, `error` |
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `OSP_INTERVAL` | `1` | Metric collection interval in seconds |
 
-**Example config file** (`os-pulse.toml`):
-
-```toml
-[general]
-interval = 2          # seconds
-port = 3000
-log_level = "info"
-
-[storage]
-backend = "sqlite"    # "sqlite" | "influxdb" | "timescaledb"
-data_dir = "./data"
-retention = "30d"
-
-[storage.influxdb]
-url = "http://localhost:8086"
-token = ""
-org = "default"
-bucket = "os-pulse"
-
-[storage.timescaledb]
-url = "postgres://user:pass@localhost:5432/ospulse"
-
-[docker]
-enabled = true
-socket = "/var/run/docker.sock"
-```
+The web dashboard always listens on **port 3000**. Data is stored in an SQLite database (`os_pulse.db`) in the working directory.
 
 ---
 
@@ -230,20 +210,23 @@ socket = "/var/run/docker.sock"
 ## Roadmap
 
 - [x] Project scaffolding
-- [ ] System metrics collector (CPU, memory, disk, network)
+- [x] System metrics collector (CPU, memory, disk, network)
+- [x] Docker container metrics collector
+- [x] SQLite storage backend
+- [x] REST API
+- [x] Web dashboard (single-page)
+- [x] Historical trend charts (system + container)
+- [x] Token-based authentication & session management
+- [x] Dockerfile for containerised deployment
 - [ ] Process list collector
-- [ ] Docker container metrics collector
-- [ ] SQLite storage backend
 - [ ] InfluxDB storage backend
 - [ ] TimescaleDB storage backend
-- [ ] REST API
 - [ ] WebSocket real-time push
-- [ ] Web dashboard (single-page)
-- [ ] Historical trend charts
 - [ ] Alerting / threshold notifications
 - [ ] Prometheus export endpoint
 - [ ] Plugin system for custom collectors
 - [ ] ARM64 / multi-arch Docker images
+- [ ] Published Docker image (GHCR)
 
 ---
 

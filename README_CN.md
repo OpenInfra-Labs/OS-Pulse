@@ -45,12 +45,10 @@
 - 极低开销 —— 通常 < 1% CPU，< 20 MB 内存
 
 ### 历史数据存储
-- **SQLite** —— 零配置，嵌入式（默认）
-- **InfluxDB** —— 适用于大规模或集群部署
-- **TimescaleDB** —— 基于 PostgreSQL 的时序数据库扩展
-- 可配置保留策略
-- 支持趋势分析和跨时段对比
-- 内置 SQLite 历史表，记录系统与容器快照
+- **SQLite** —— 零配置，嵌入式单文件数据库
+- 内置系统与容器指标快照历史表
+- 聚合趋势桶（15 分钟 / 1 小时 / 6 小时 / 24 小时），自动汇总
+- 自动清理超过 48 小时的原始历史数据
 
 ### Web 仪表盘
 - 简洁、响应式的单页 UI
@@ -82,9 +80,9 @@
 │                                             │
 │  ┌──────────┐  ┌──────────┐  ┌───────────┐ │
 │  │  系统    │  │  容器    │  │  存储层   │ │
-│  │  采集器  │  │  采集器  │  │ (SQLite / │ │
-│  │ (sysinfo)│  │ (Docker) │  │ InfluxDB /│ │
-│  └────┬─────┘  └────┬─────┘  │TimescaleDB)│ │
+│  │  采集器  │  │  采集器  │  │  (SQLite)  │ │
+│  │ (sysinfo)│  │ (Docker) │  │            │ │
+│  └────┬─────┘  └────┬─────┘  │            │ │
 │       │              │        └─────┬──────┘ │
 │       └──────┬───────┘              │        │
 │              ▼                      │        │
@@ -124,31 +122,33 @@ cargo build --release
 ### 运行
 
 ```bash
-# 使用默认设置启动（SQLite，1 秒间隔，端口 3000）
+# 使用默认设置启动（SQLite，1 秒采样，端口 3000）
 ./target/release/os-pulse
 
-# 自定义配置
-./target/release/os-pulse \
-  --interval 2 \
-  --port 8080 \
-  --storage influxdb \
-  --influxdb-url http://localhost:8086
+# 自定义采样间隔（秒）
+OSP_INTERVAL=2 ./target/release/os-pulse
 ```
 
 然后在浏览器中打开 **http://localhost:3000**。
 
 首次访问会先进入登录页，并要求创建初始账号。
 
+> **注意：** 如需监控 Docker 容器，请确保运行 OS-Pulse 的用户有权访问 Docker Socket（`/var/run/docker.sock`）。
+
 ### 使用 Docker 运行
 
+目前没有预构建的 Docker 镜像，请使用项目内的 `Dockerfile` 从源码构建：
+
 ```bash
+# 构建镜像
+docker build -t os-pulse .
+
+# 运行容器
 docker run -d \
   --name os-pulse \
   -p 3000:3000 \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
-  -v /proc:/host/proc:ro \
-  -v /sys:/host/sys:ro \
-  ghcr.io/openinfra-labs/os-pulse:latest
+  os-pulse
 ```
 
 ### Docker Compose
@@ -157,61 +157,41 @@ docker run -d \
 version: "3.8"
 services:
   os-pulse:
-    image: ghcr.io/openinfra-labs/os-pulse:latest
+    build: .
     ports:
       - "3000:3000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - os-pulse-data:/data
+    environment:
+      - OSP_INTERVAL=1
     restart: unless-stopped
+```
 
-volumes:
-  os-pulse-data:
+### 使用 Rust 容器快速体验
+
+如果本地未安装 Rust 工具链，可以直接在 Rust 容器内构建和运行：
+
+ ```bash
+docker run -it --rm \
+  -p 3000:3000 \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -v "$(pwd)":/app \
+  -w /app \
+  rust:1.85-bookworm \
+  bash -c "cargo build --release && ./target/release/os-pulse"
 ```
 
 ---
 
 ## 配置
 
-OS-Pulse 支持通过 CLI 参数、环境变量或 TOML 配置文件进行配置。
+OS-Pulse 通过环境变量进行配置。
 
-| 参数 | CLI 标志 | 环境变量 | 默认值 | 说明 |
-|------|----------|----------|--------|------|
-| 采样间隔 | `--interval` | `OSP_INTERVAL` | `1` | 指标采集间隔（秒） |
-| HTTP 端口 | `--port` | `OSP_PORT` | `3000` | Web 仪表盘端口 |
-| 存储后端 | `--storage` | `OSP_STORAGE` | `sqlite` | `sqlite`、`influxdb` 或 `timescaledb` |
-| 数据目录 | `--data-dir` | `OSP_DATA_DIR` | `./data` | SQLite 数据库文件目录 |
-| 保留时间 | `--retention` | `OSP_RETENTION` | `7d` | 历史数据保留时长 |
-| 日志级别 | `--log-level` | `OSP_LOG_LEVEL` | `info` | `trace`、`debug`、`info`、`warn`、`error` |
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `OSP_INTERVAL` | `1` | 指标采集间隔（秒） |
 
-**配置文件示例**（`os-pulse.toml`）：
-
-```toml
-[general]
-interval = 2          # 秒
-port = 3000
-log_level = "info"
-
-[storage]
-backend = "sqlite"    # "sqlite" | "influxdb" | "timescaledb"
-data_dir = "./data"
-retention = "30d"
-
-[storage.influxdb]
-url = "http://localhost:8086"
-token = ""
-org = "default"
-bucket = "os-pulse"
-
-[storage.timescaledb]
-url = "postgres://user:pass@localhost:5432/ospulse"
-
-[docker]
-enabled = true
-socket = "/var/run/docker.sock"
-```
+Web 仪表盘固定监听 **3000** 端口。数据存储在工作目录下的 SQLite 数据库文件（`os_pulse.db`）中。
 
 ---
 
@@ -230,20 +210,23 @@ socket = "/var/run/docker.sock"
 ## 路线图
 
 - [x] 项目脚手架
-- [ ] 系统指标采集器（CPU、内存、磁盘、网络）
+- [x] 系统指标采集器（CPU、内存、磁盘、网络）
+- [x] Docker 容器指标采集器
+- [x] SQLite 存储后端
+- [x] REST API
+- [x] Web 仪表盘（单页应用）
+- [x] 历史趋势图表（系统 + 容器）
+- [x] Token 认证与会话管理
+- [x] Dockerfile 容器化部署
 - [ ] 进程列表采集器
-- [ ] Docker 容器指标采集器
-- [ ] SQLite 存储后端
 - [ ] InfluxDB 存储后端
 - [ ] TimescaleDB 存储后端
-- [ ] REST API
 - [ ] WebSocket 实时推送
-- [ ] Web 仪表盘（单页应用）
-- [ ] 历史趋势图表
 - [ ] 告警 / 阈值通知
 - [ ] Prometheus 导出端点
 - [ ] 插件系统（自定义采集器）
 - [ ] ARM64 / 多架构 Docker 镜像
+- [ ] 发布 Docker 镜像（GHCR）
 
 ---
 

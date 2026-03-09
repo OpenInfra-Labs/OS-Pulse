@@ -233,6 +233,10 @@ button:hover {
   gap: 12px;
 }
 
+.trend-grid-host {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .trend-card {
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -251,6 +255,7 @@ button:hover {
   width: 100%;
   height: 120px;
   display: block;
+  image-rendering: auto;
 }
 
 .table {
@@ -278,6 +283,10 @@ button:hover {
 
 @media (max-width: 980px) {
   .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .trend-grid-host {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

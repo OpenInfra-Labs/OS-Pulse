@@ -36,18 +36,22 @@
           <button class="range-btn" data-min="1440">24h</button>
         </div>
       </div>
-      <div class="trend-grid">
+      <div class="trend-grid trend-grid-host">
         <article class="trend-card">
           <h4>CPU %</h4>
-          <canvas id="cpuTrend" width="360" height="120"></canvas>
+          <canvas id="cpuTrend"></canvas>
         </article>
         <article class="trend-card">
           <h4>Memory %</h4>
-          <canvas id="memTrend" width="360" height="120"></canvas>
+          <canvas id="memTrend"></canvas>
         </article>
         <article class="trend-card">
           <h4>Disk %</h4>
-          <canvas id="diskTrend" width="360" height="120"></canvas>
+          <canvas id="diskTrend"></canvas>
+        </article>
+        <article class="trend-card">
+          <h4>Network B/s</h4>
+          <canvas id="netTrend"></canvas>
         </article>
       </div>
     </section>
@@ -60,15 +64,15 @@
       <div class="trend-grid">
         <article class="trend-card">
           <h4>Container CPU %</h4>
-          <canvas id="containerCpuTrend" width="360" height="120"></canvas>
+          <canvas id="containerCpuTrend"></canvas>
         </article>
         <article class="trend-card">
           <h4>Container Memory %</h4>
-          <canvas id="containerMemTrend" width="360" height="120"></canvas>
+          <canvas id="containerMemTrend"></canvas>
         </article>
         <article class="trend-card">
           <h4>Container Network+Disk I/O</h4>
-          <canvas id="containerIoTrend" width="360" height="120"></canvas>
+          <canvas id="containerIoTrend"></canvas>
         </article>
       </div>
     </section>
@@ -160,15 +164,30 @@
       }
     }
 
+    function setupCanvas(canvas) {
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const cssWidth = Math.max(1, Math.floor(canvas.clientWidth));
+      const cssHeight = 120;
+      const pixelWidth = Math.floor(cssWidth * dpr);
+      const pixelHeight = Math.floor(cssHeight * dpr);
+      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+        canvas.width = pixelWidth;
+        canvas.height = pixelHeight;
+      }
+      const ctx = canvas.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return { ctx, w: cssWidth, h: cssHeight };
+    }
+
     function drawLine(canvasId, values, color) {
       const canvas = document.getElementById(canvasId);
-      const ctx = canvas.getContext('2d');
-      const w = canvas.width;
-      const h = canvas.height;
+      const { ctx, w, h } = setupCanvas(canvas);
       ctx.clearRect(0, 0, w, h);
 
       ctx.strokeStyle = 'rgba(120,147,198,0.25)';
       ctx.lineWidth = 1;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.moveTo(0, h - 0.5);
       ctx.lineTo(w, h - 0.5);
@@ -202,6 +221,7 @@
       drawLine('cpuTrend', points.map(p => p.cpu_percent), '#54c7ff');
       drawLine('memTrend', points.map(p => p.memory_percent), '#7b61ff');
       drawLine('diskTrend', points.map(p => p.disk_percent), '#30d188');
+      drawLine('netTrend', points.map(p => p.network_total_bytes), '#f5b740');
     }
 
     function syncContainerSelect(available, selected) {
@@ -285,6 +305,10 @@
 
     bindRangeButtons();
     bindContainerSelect();
+    window.addEventListener('resize', () => {
+      loadTrends();
+      loadContainerTrends();
+    });
     loadMe().then(() => pulse());
     setInterval(pulse, 3000);
   </script>

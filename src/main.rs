@@ -817,10 +817,12 @@ fn update_system_aggregates(db: &Connection, snapshot: &MetricsResponse) {
             ],
         );
 
-        let _ = db.execute(
-            "DELETE FROM system_metrics_agg WHERE window_minutes = ?1 AND bucket_end_ms < ?2",
-            params![minutes as i64, keep_from_ms],
-        );
+        if minutes != 1440 {
+            let _ = db.execute(
+                "DELETE FROM system_metrics_agg WHERE window_minutes = ?1 AND bucket_end_ms < ?2",
+                params![minutes as i64, keep_from_ms],
+            );
+        }
     }
 }
 

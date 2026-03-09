@@ -63,6 +63,8 @@ It runs equally well **on the host** or **inside a container**.
 - Background sampler collects host + container metrics continuously
 - Sampling interval configurable via `OSP_INTERVAL` (seconds, default `1`)
 - Historical trend API: `GET /api/trends?minutes=60` (login required)
+- Container trend API with name filter: `GET /api/trends/containers?minutes=60&name=<container>`
+- Dashboard supports quick time range switching: `15m / 1h / 6h / 24h`
 
 ### Authentication & Access Control
 - First-time startup requires creating the initial account on the login page

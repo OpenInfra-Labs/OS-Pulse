@@ -28,7 +28,13 @@
 
     <section class="card section">
       <div class="trend-head">
-        <h3>Historical Trends (Last 60 Minutes)</h3>
+        <h3>Historical Trends</h3>
+        <div class="range-group" id="rangeGroup">
+          <button class="range-btn" data-min="15">15m</button>
+          <button class="range-btn active" data-min="60">1h</button>
+          <button class="range-btn" data-min="360">6h</button>
+          <button class="range-btn" data-min="1440">24h</button>
+        </div>
       </div>
       <div class="trend-grid">
         <article class="trend-card">
@@ -42,6 +48,27 @@
         <article class="trend-card">
           <h4>Disk %</h4>
           <canvas id="diskTrend" width="360" height="120"></canvas>
+        </article>
+      </div>
+    </section>
+
+    <section class="card section">
+      <div class="trend-head">
+        <h3>Container Trends</h3>
+        <select id="containerSelect" class="select"></select>
+      </div>
+      <div class="trend-grid">
+        <article class="trend-card">
+          <h4>Container CPU %</h4>
+          <canvas id="containerCpuTrend" width="360" height="120"></canvas>
+        </article>
+        <article class="trend-card">
+          <h4>Container Memory %</h4>
+          <canvas id="containerMemTrend" width="360" height="120"></canvas>
+        </article>
+        <article class="trend-card">
+          <h4>Container Network+Disk I/O</h4>
+          <canvas id="containerIoTrend" width="360" height="120"></canvas>
         </article>
       </div>
     </section>
@@ -69,6 +96,9 @@
   </main>
 
   <script>
+    let selectedMinutes = 60;
+    let selectedContainer = '';
+
     function fmtBytes(n) {
       if (n === null || n === undefined) return '--';
       const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -162,7 +192,7 @@
     }
 
     async function loadTrends() {
-      const res = await fetch('/api/trends?minutes=60', { credentials: 'include' });
+      const res = await fetch(`/api/trends?minutes=${selectedMinutes}`, { credentials: 'include' });
       if (res.status === 401) {
         window.location.href = '/login';
         return;
@@ -174,6 +204,73 @@
       drawLine('diskTrend', points.map(p => p.disk_percent), '#30d188');
     }
 
+    function syncContainerSelect(available, selected) {
+      const select = document.getElementById('containerSelect');
+      if (!available.length) {
+        select.innerHTML = '<option value="">No container history yet</option>';
+        select.disabled = true;
+        return;
+      }
+
+      select.disabled = false;
+      const current = selected || available[0];
+      if (selectedContainer && available.includes(selectedContainer)) {
+        select.value = selectedContainer;
+      } else {
+        selectedContainer = current;
+      }
+
+      select.innerHTML = available
+        .map(name => `<option value="${name}">${name}</option>`)
+        .join('');
+      select.value = selectedContainer;
+    }
+
+    async function loadContainerTrends() {
+      const queryName = selectedContainer ? `&name=${encodeURIComponent(selectedContainer)}` : '';
+      const res = await fetch(`/api/trends/containers?minutes=${selectedMinutes}${queryName}`, { credentials: 'include' });
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      const data = await res.json();
+      syncContainerSelect(data.available || [], data.selected || '');
+
+      const points = data.points || [];
+      const memoryPercents = points.map(p => {
+        if (!p.memory_limit_bytes) return 0;
+        return (p.memory_used_bytes / p.memory_limit_bytes) * 100;
+      });
+      const ioTotals = points.map(p => p.network_total_bytes + p.disk_io_total_bytes);
+
+      drawLine('containerCpuTrend', points.map(p => p.cpu_percent), '#54c7ff');
+      drawLine('containerMemTrend', memoryPercents, '#7b61ff');
+      drawLine('containerIoTrend', ioTotals, '#f5b740');
+    }
+
+    function bindRangeButtons() {
+      const group = document.getElementById('rangeGroup');
+      group.addEventListener('click', async (e) => {
+        const btn = e.target.closest('.range-btn');
+        if (!btn) return;
+        selectedMinutes = Number(btn.dataset.min || 60);
+        for (const b of group.querySelectorAll('.range-btn')) {
+          b.classList.remove('active');
+        }
+        btn.classList.add('active');
+        await loadTrends();
+        await loadContainerTrends();
+      });
+    }
+
+    function bindContainerSelect() {
+      const select = document.getElementById('containerSelect');
+      select.addEventListener('change', async () => {
+        selectedContainer = select.value;
+        await loadContainerTrends();
+      });
+    }
+
     document.getElementById('logoutBtn').addEventListener('click', async () => {
       await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
       window.location.href = '/login';
@@ -182,9 +279,12 @@
     async function pulse() {
       await loadMetrics();
       await loadTrends();
+      await loadContainerTrends();
       await fetch('/api/action', { method: 'POST', credentials: 'include' });
     }
 
+    bindRangeButtons();
+    bindContainerSelect();
     loadMe().then(() => pulse());
     setInterval(pulse, 3000);
   </script>

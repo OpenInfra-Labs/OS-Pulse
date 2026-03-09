@@ -191,6 +191,40 @@ button:hover {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 12px;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.range-group {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.range-btn {
+  margin: 0;
+  width: auto;
+  padding: 7px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(11, 18, 33, 0.8);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.range-btn.active {
+  color: #051225;
+  border-color: transparent;
+  background: linear-gradient(90deg, var(--primary), var(--primary-2));
+}
+
+.select {
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(11, 18, 33, 0.9);
+  color: var(--text);
+  padding: 8px 10px;
+  min-width: 220px;
 }
 
 .trend-grid {

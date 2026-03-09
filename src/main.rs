@@ -123,6 +123,29 @@ struct TrendResponse {
     points: Vec<TrendPoint>,
 }
 
+#[derive(Deserialize)]
+struct ContainerTrendQuery {
+    minutes: Option<u32>,
+    name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ContainerTrendPoint {
+    ts: i64,
+    cpu_percent: f64,
+    memory_used_bytes: u64,
+    memory_limit_bytes: u64,
+    network_total_bytes: u64,
+    disk_io_total_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct ContainerTrendResponse {
+    selected: Option<String>,
+    available: Vec<String>,
+    points: Vec<ContainerTrendPoint>,
+}
+
 #[tokio::main]
 async fn main() {
     let connection = Connection::open("os_pulse.db").expect("open sqlite database");
@@ -147,6 +170,7 @@ async fn main() {
         .route("/api/me", get(api_me))
         .route("/api/metrics", get(api_metrics))
         .route("/api/trends", get(api_trends))
+        .route("/api/trends/containers", get(api_container_trends))
         .route("/api/action", post(api_action))
         .route("/api/auth/logout", post(api_logout))
         .route_layer(middleware::from_fn_with_state(
@@ -359,6 +383,101 @@ async fn api_trends(
     }
 
     Json(TrendResponse { points }).into_response()
+}
+
+async fn api_container_trends(
+    State(state): State<AppState>,
+    Query(query): Query<ContainerTrendQuery>,
+) -> impl IntoResponse {
+    let minutes = query.minutes.unwrap_or(60).clamp(5, 7 * 24 * 60);
+    let from_ts = now_ts() - (minutes as i64 * 60);
+
+    let db = state.db.lock().expect("db lock");
+
+    let mut list_stmt = match db.prepare(
+        "
+        SELECT DISTINCT name
+        FROM container_metrics_history
+        WHERE ts >= ?1
+        ORDER BY name ASC
+        ",
+    ) {
+        Ok(v) => v,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Query failed"),
+    };
+
+    let list_rows = match list_stmt.query_map(params![from_ts], |row| row.get::<_, String>(0)) {
+        Ok(v) => v,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Query failed"),
+    };
+
+    let mut available = Vec::new();
+    for row in list_rows {
+        if let Ok(name) = row {
+            available.push(name);
+        }
+    }
+
+    let selected = query
+        .name
+        .as_ref()
+        .filter(|name| available.iter().any(|item| item == *name))
+        .cloned()
+        .or_else(|| available.first().cloned());
+
+    let Some(selected_name) = selected.clone() else {
+        return Json(ContainerTrendResponse {
+            selected: None,
+            available,
+            points: Vec::new(),
+        })
+        .into_response();
+    };
+
+    let mut stmt = match db.prepare(
+        "
+        SELECT ts, cpu_percent, memory_used_bytes, memory_limit_bytes,
+               network_rx_bytes, network_tx_bytes, disk_read_bytes, disk_write_bytes
+        FROM container_metrics_history
+        WHERE ts >= ?1 AND name = ?2
+        ORDER BY ts ASC
+        ",
+    ) {
+        Ok(v) => v,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Query failed"),
+    };
+
+    let rows = match stmt.query_map(params![from_ts, selected_name], |row| {
+        let network_rx: i64 = row.get(4)?;
+        let network_tx: i64 = row.get(5)?;
+        let disk_read: i64 = row.get(6)?;
+        let disk_write: i64 = row.get(7)?;
+        Ok(ContainerTrendPoint {
+            ts: row.get(0)?,
+            cpu_percent: row.get(1)?,
+            memory_used_bytes: row.get::<_, i64>(2)? as u64,
+            memory_limit_bytes: row.get::<_, i64>(3)? as u64,
+            network_total_bytes: (network_rx + network_tx).max(0) as u64,
+            disk_io_total_bytes: (disk_read + disk_write).max(0) as u64,
+        })
+    }) {
+        Ok(v) => v,
+        Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Query failed"),
+    };
+
+    let mut points = Vec::new();
+    for row in rows {
+        if let Ok(point) = row {
+            points.push(point);
+        }
+    }
+
+    Json(ContainerTrendResponse {
+        selected,
+        available,
+        points,
+    })
+    .into_response()
 }
 
 async fn auth_middleware(

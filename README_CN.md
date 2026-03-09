@@ -63,6 +63,8 @@
 - 后台采样任务持续采集宿主机与容器指标
 - 采样间隔可通过 `OSP_INTERVAL`（秒）配置，默认 `1`
 - 历史趋势接口：`GET /api/trends?minutes=60`（需登录）
+- 容器趋势接口（按容器筛选）：`GET /api/trends/containers?minutes=60&name=<container>`
+- Dashboard 支持时间范围快速切换：`15m / 1h / 6h / 24h`
 
 ### 鉴权与访问控制
 - 首次启动时需在登录页创建初始账号

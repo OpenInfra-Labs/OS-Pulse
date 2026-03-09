@@ -106,6 +106,24 @@
     let selectedContainer = '';
     const chartStore = {};
 
+    const verticalGuidePlugin = {
+      id: 'verticalGuide',
+      afterDatasetsDraw(chart) {
+        const active = chart.tooltip?.getActiveElements?.() || [];
+        if (!active.length) return;
+        const { ctx, chartArea } = chart;
+        const x = active[0].element.x;
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(x, chartArea.top);
+        ctx.lineTo(x, chartArea.bottom);
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(120,147,198,0.45)';
+        ctx.stroke();
+        ctx.restore();
+      },
+    };
+
     function fmtBytes(n) {
       if (n === null || n === undefined) return '--';
       const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -182,6 +200,7 @@
       const canvas = document.getElementById(canvasId);
       const chart = new Chart(canvas, {
         type: 'line',
+        plugins: [verticalGuidePlugin],
         data: {
           labels: [],
           datasets: [{
@@ -189,7 +208,7 @@
             borderColor: color,
             backgroundColor: color,
             pointRadius: 0,
-            pointHoverRadius: 2,
+            pointHoverRadius: 3,
             borderWidth: 2,
             tension: 0.25,
           }],
@@ -199,9 +218,18 @@
           maintainAspectRatio: false,
           animation: false,
           normalized: true,
+          interaction: {
+            mode: 'index',
+            axis: 'x',
+            intersect: false,
+          },
           plugins: {
             legend: { display: false },
-            tooltip: { enabled: true },
+            tooltip: {
+              enabled: true,
+              mode: 'index',
+              intersect: false,
+            },
           },
           scales: {
             x: {

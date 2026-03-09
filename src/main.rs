@@ -131,6 +131,10 @@ struct TrendPoint {
 #[derive(Serialize)]
 struct TrendResponse {
     points: Vec<TrendPoint>,
+    requested_minutes: u32,
+    available_minutes: u32,
+    returned_points: usize,
+    sampled: bool,
 }
 
 #[derive(Deserialize)]
@@ -393,9 +397,27 @@ async fn api_trends(
         }
     }
 
-    points = downsample_points(points, MAX_TREND_POINTS);
+    let raw_len = points.len();
+    let available_minutes = if raw_len >= 2 {
+        let first_ts = points.first().map(|p| p.ts).unwrap_or(from_ts);
+        let last_ts = points.last().map(|p| p.ts).unwrap_or(from_ts);
+        ((last_ts - first_ts).max(0) / 60) as u32
+    } else {
+        0
+    };
 
-    Json(TrendResponse { points }).into_response()
+    let sampled = raw_len > MAX_TREND_POINTS;
+    points = downsample_points(points, MAX_TREND_POINTS);
+    let returned_points = points.len();
+
+    Json(TrendResponse {
+        points,
+        requested_minutes: minutes,
+        available_minutes,
+        returned_points,
+        sampled,
+    })
+    .into_response()
 }
 
 async fn api_container_trends(

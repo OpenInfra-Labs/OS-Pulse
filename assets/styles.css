@@ -195,6 +195,11 @@ button:hover {
   flex-wrap: wrap;
 }
 
+.meta-text {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .range-group {
   display: inline-flex;
   gap: 8px;

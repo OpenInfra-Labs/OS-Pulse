@@ -30,6 +30,7 @@
     <section class="card section">
       <div class="trend-head">
         <h3>Historical Trends</h3>
+        <div id="historyMeta" class="meta-text">Loading history...</div>
         <div class="range-group" id="rangeGroup">
           <button class="range-btn" data-min="15">15m</button>
           <button class="range-btn active" data-min="60">1h</button>
@@ -247,6 +248,9 @@
       drawLine('memTrend', points.map(p => p.memory_percent), '#7b61ff', labels, (v) => `${Number(v).toFixed(1)}%`);
       drawLine('diskTrend', points.map(p => p.disk_percent), '#30d188', labels, (v) => `${Number(v).toFixed(1)}%`);
       drawLine('netTrend', points.map(p => (Number(p.network_total_bytes || 0) * 8) / 1_000_000), '#f5b740', labels, (v) => `${Number(v).toFixed(2)} Mbps`);
+
+      const sampled = data.sampled ? ' · sampled to 96' : '';
+      document.getElementById('historyMeta').textContent = `window ${data.requested_minutes}m · available ${data.available_minutes}m · points ${data.returned_points}${sampled}`;
     }
 
     function syncContainerSelect(available, selected) {

@@ -25,17 +25,45 @@ pub(crate) async fn root_redirect(
 }
 
 pub(crate) async fn login_page() -> impl IntoResponse {
-    Html(include_str!("../assets/login.html"))
+    Html(include_str!("../frontend/login.html"))
 }
 
 pub(crate) async fn dashboard_page() -> impl IntoResponse {
-    Html(include_str!("../assets/dashboard.html"))
+    Html(include_str!("../frontend/dashboard.html"))
 }
 
-pub(crate) async fn styles_css() -> impl IntoResponse {
+pub(crate) async fn base_css() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        include_str!("../assets/styles.css"),
+        include_str!("../frontend/css/base.css"),
+    )
+}
+
+pub(crate) async fn dashboard_css() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../frontend/css/dashboard.css"),
+    )
+}
+
+pub(crate) async fn utils_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        include_str!("../frontend/js/utils.js"),
+    )
+}
+
+pub(crate) async fn charts_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        include_str!("../frontend/js/charts.js"),
+    )
+}
+
+pub(crate) async fn dashboard_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        include_str!("../frontend/js/dashboard.js"),
     )
 }
 

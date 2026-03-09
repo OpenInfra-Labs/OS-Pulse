@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OS-Pulse · Dashboard</title>
+  <link rel="stylesheet" href="/css/base.css" />
+  <link rel="stylesheet" href="/css/dashboard.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <main class="page">
+    <header class="topbar">
+      <div>
+        <h2>OS-Pulse Dashboard</h2>
+        <p id="welcome">Signed in</p>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center;">
+        <div class="status-chip"><span></span> Live</div>
+        <button id="logoutBtn" style="margin:0; width:auto; padding:10px 14px;">Logout</button>
+      </div>
+    </header>
+
+    <section class="grid" id="metricsGrid">
+      <article class="card metric"><h3>CPU Usage</h3><div class="v" id="cpuV">--</div><div class="s" id="cpuS">--</div></article>
+      <article class="card metric"><h3>Memory Usage</h3><div class="v" id="memV">--</div><div class="s" id="memS">--</div></article>
+      <article class="card metric"><h3>Disk Usage</h3><div class="v" id="diskV">--</div><div class="s" id="diskS">--</div></article>
+      <article class="card metric"><h3>Network Throughput</h3><div class="v" id="netV">--</div><div class="s" id="netS">--</div></article>
+    </section>
+
+    <section class="card section">
+      <div class="trend-head">
+        <h3>Historical Trends</h3>
+        <div id="historyMeta" class="meta-text">Loading history...</div>
+        <div class="range-group" id="rangeGroup">
+          <button class="range-btn active" data-min="15">15m</button>
+          <button class="range-btn" data-min="60">1h</button>
+          <button class="range-btn" data-min="360">6h</button>
+          <button class="range-btn" data-min="1440">24h</button>
+        </div>
+      </div>
+      <div class="trend-grid trend-grid-host">
+        <article class="trend-card">
+          <h4>CPU %</h4>
+          <div class="chart-wrap"><canvas id="cpuTrend"></canvas></div>
+        </article>
+        <article class="trend-card">
+          <h4>Memory %</h4>
+          <div class="chart-wrap"><canvas id="memTrend"></canvas></div>
+        </article>
+        <article class="trend-card">
+          <h4>Disk IOPS</h4>
+          <div class="chart-wrap"><canvas id="diskTrend"></canvas></div>
+        </article>
+        <article class="trend-card">
+          <h4>Network Mbps</h4>
+          <div class="chart-wrap"><canvas id="netTrend"></canvas></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="card section">
+      <div class="trend-head">
+        <h3>Container Trends</h3>
+        <select id="containerSelect" class="select"></select>
+      </div>
+      <div class="trend-grid">
+        <article class="trend-card">
+          <h4>Container CPU %</h4>
+          <div class="chart-wrap"><canvas id="containerCpuTrend"></canvas></div>
+        </article>
+        <article class="trend-card">
+          <h4>Container Memory %</h4>
+          <div class="chart-wrap"><canvas id="containerMemTrend"></canvas></div>
+        </article>
+        <article class="trend-card">
+          <h4>Container Network+Disk I/O</h4>
+          <div class="chart-wrap"><canvas id="containerIoTrend"></canvas></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="card section">
+      <h3>Containers</h3>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Status</th>
+            <th>CPU</th>
+            <th>Memory</th>
+            <th>Network</th>
+            <th>Disk I/O</th>
+            <th>Image</th>
+            <th>Tag</th>
+            <th>Restarts</th>
+          </tr>
+        </thead>
+        <tbody id="containerRows"></tbody>
+      </table>
+      <div id="containerEmpty" class="empty" style="display:none;">No containers found or Docker socket unavailable.</div>
+    </section>
+  </main>
+
+  <script src="/js/utils.js"></script>
+  <script src="/js/charts.js"></script>
+  <script src="/js/dashboard.js"></script>
+</body>
+</html>

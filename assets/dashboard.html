@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>OS-Pulse · Dashboard</title>
   <link rel="stylesheet" href="/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
 </head>
 <body>
   <main class="page">
@@ -102,6 +103,7 @@
   <script>
     let selectedMinutes = 60;
     let selectedContainer = '';
+    const chartStore = {};
 
     function fmtBytes(n) {
       if (n === null || n === undefined) return '--';
@@ -164,50 +166,55 @@
       }
     }
 
-    function setupCanvas(canvas) {
-      const dpr = Math.max(1, window.devicePixelRatio || 1);
-      const cssWidth = Math.max(1, Math.floor(canvas.clientWidth));
-      const cssHeight = 120;
-      const pixelWidth = Math.floor(cssWidth * dpr);
-      const pixelHeight = Math.floor(cssHeight * dpr);
-      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
-        canvas.width = pixelWidth;
-        canvas.height = pixelHeight;
-      }
-      const ctx = canvas.getContext('2d');
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      return { ctx, w: cssWidth, h: cssHeight };
+    function ensureLineChart(canvasId, color) {
+      if (chartStore[canvasId]) return chartStore[canvasId];
+      const canvas = document.getElementById(canvasId);
+      const chart = new Chart(canvas, {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: [{
+            data: [],
+            borderColor: color,
+            backgroundColor: color,
+            pointRadius: 0,
+            pointHoverRadius: 2,
+            borderWidth: 2,
+            tension: 0.25,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          normalized: true,
+          plugins: {
+            legend: { display: false },
+            tooltip: { enabled: true },
+          },
+          scales: {
+            x: {
+              grid: { color: 'rgba(120,147,198,0.14)' },
+              ticks: { display: false },
+              border: { color: 'rgba(120,147,198,0.25)' },
+            },
+            y: {
+              grid: { color: 'rgba(120,147,198,0.14)' },
+              ticks: { color: '#93a4c4', maxTicksLimit: 4 },
+              border: { color: 'rgba(120,147,198,0.25)' },
+            },
+          },
+        },
+      });
+      chartStore[canvasId] = chart;
+      return chart;
     }
 
     function drawLine(canvasId, values, color) {
-      const canvas = document.getElementById(canvasId);
-      const { ctx, w, h } = setupCanvas(canvas);
-      ctx.clearRect(0, 0, w, h);
-
-      ctx.strokeStyle = 'rgba(120,147,198,0.25)';
-      ctx.lineWidth = 1;
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(0, h - 0.5);
-      ctx.lineTo(w, h - 0.5);
-      ctx.stroke();
-
-      if (!values.length) return;
-      const min = Math.min(...values);
-      const max = Math.max(...values);
-      const range = Math.max(1, max - min);
-
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      for (let i = 0; i < values.length; i++) {
-        const x = (i / Math.max(1, values.length - 1)) * w;
-        const y = h - ((values[i] - min) / range) * (h - 8) - 4;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.stroke();
+      const chart = ensureLineChart(canvasId, color);
+      chart.data.labels = values.map((_, idx) => idx + 1);
+      chart.data.datasets[0].data = values;
+      chart.update('none');
     }
 
     async function loadTrends() {
@@ -305,10 +312,6 @@
 
     bindRangeButtons();
     bindContainerSelect();
-    window.addEventListener('resize', () => {
-      loadTrends();
-      loadContainerTrends();
-    });
     loadMe().then(() => pulse());
     setInterval(pulse, 3000);
   </script>

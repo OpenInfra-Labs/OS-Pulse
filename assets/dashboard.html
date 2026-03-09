@@ -32,8 +32,8 @@
         <h3>Historical Trends</h3>
         <div id="historyMeta" class="meta-text">Loading history...</div>
         <div class="range-group" id="rangeGroup">
-          <button class="range-btn" data-min="15">15m</button>
-          <button class="range-btn active" data-min="60">1h</button>
+          <button class="range-btn active" data-min="15">15m</button>
+          <button class="range-btn" data-min="60">1h</button>
           <button class="range-btn" data-min="360">6h</button>
           <button class="range-btn" data-min="1440">24h</button>
         </div>
@@ -102,9 +102,10 @@
   </main>
 
   <script>
-    let selectedMinutes = 60;
+    let selectedMinutes = 15;
     let selectedContainer = '';
     const chartStore = {};
+    const FIXED_TREND_POINTS = 96;
 
     const verticalGuidePlugin = {
       id: 'verticalGuide',
@@ -141,6 +142,29 @@
     function fmtTime(ts) {
       if (!ts) return '--:--:--';
       return new Date(ts * 1000).toLocaleTimeString('en-GB', { hour12: false });
+    }
+
+    function buildWindowSeries(points, valueMapper) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const spanSec = selectedMinutes * 60;
+      const bucketSec = Math.max(1, Math.floor(spanSec / FIXED_TREND_POINTS));
+      const startSec = nowSec - spanSec;
+
+      const labels = Array.from({ length: FIXED_TREND_POINTS }, (_, idx) => {
+        const ts = startSec + idx * bucketSec;
+        return fmtTime(ts);
+      });
+      const values = new Array(FIXED_TREND_POINTS).fill(null);
+
+      for (const point of points || []) {
+        const offset = Number(point.ts || 0) - startSec;
+        if (offset < 0) continue;
+        let bucketIdx = Math.floor(offset / bucketSec);
+        if (bucketIdx >= FIXED_TREND_POINTS) bucketIdx = FIXED_TREND_POINTS - 1;
+        values[bucketIdx] = valueMapper(point);
+      }
+
+      return { labels, values };
     }
 
     async function loadMe() {
@@ -271,11 +295,15 @@
       }
       const data = await res.json();
       const points = data.points || [];
-      const labels = points.map(p => fmtTime(p.ts));
-      drawLine('cpuTrend', points.map(p => p.cpu_percent), '#54c7ff', labels, (v) => `${Number(v).toFixed(1)}%`);
-      drawLine('memTrend', points.map(p => p.memory_percent), '#7b61ff', labels, (v) => `${Number(v).toFixed(1)}%`);
-      drawLine('diskTrend', points.map(p => Number(p.disk_io_bytes || 0) / 4096), '#30d188', labels, (v) => `${Number(v).toFixed(0)} IOPS`);
-      drawLine('netTrend', points.map(p => (Number(p.network_total_bytes || 0) * 8) / 1_000_000), '#f5b740', labels, (v) => `${Number(v).toFixed(2)} Mbps`);
+      const cpuSeries = buildWindowSeries(points, (p) => p.cpu_percent);
+      const memSeries = buildWindowSeries(points, (p) => p.memory_percent);
+      const diskSeries = buildWindowSeries(points, (p) => Number(p.disk_io_bytes || 0) / 4096);
+      const netSeries = buildWindowSeries(points, (p) => (Number(p.network_total_bytes || 0) * 8) / 1_000_000);
+
+      drawLine('cpuTrend', cpuSeries.values, '#54c7ff', cpuSeries.labels, (v) => `${Number(v).toFixed(1)}%`);
+      drawLine('memTrend', memSeries.values, '#7b61ff', memSeries.labels, (v) => `${Number(v).toFixed(1)}%`);
+      drawLine('diskTrend', diskSeries.values, '#30d188', diskSeries.labels, (v) => `${Number(v).toFixed(0)} IOPS`);
+      drawLine('netTrend', netSeries.values, '#f5b740', netSeries.labels, (v) => `${Number(v).toFixed(2)} Mbps`);
 
       const sampled = data.sampled ? ' · sampled to 96' : '';
       document.getElementById('historyMeta').textContent = `window ${data.requested_minutes}m · available ${data.available_minutes}m · points ${data.returned_points}${sampled}`;
@@ -314,16 +342,16 @@
       syncContainerSelect(data.available || [], data.selected || '');
 
       const points = data.points || [];
-      const memoryPercents = points.map(p => {
+      const cpuSeries = buildWindowSeries(points, (p) => p.cpu_percent);
+      const memSeries = buildWindowSeries(points, (p) => {
         if (!p.memory_limit_bytes) return 0;
         return (p.memory_used_bytes / p.memory_limit_bytes) * 100;
       });
-      const ioTotals = points.map(p => p.network_total_bytes + p.disk_io_total_bytes);
-      const labels = points.map(p => fmtTime(p.ts));
+      const ioSeries = buildWindowSeries(points, (p) => p.network_total_bytes + p.disk_io_total_bytes);
 
-      drawLine('containerCpuTrend', points.map(p => p.cpu_percent), '#54c7ff', labels, (v) => `${Number(v).toFixed(1)}%`);
-      drawLine('containerMemTrend', memoryPercents, '#7b61ff', labels, (v) => `${Number(v).toFixed(1)}%`);
-      drawLine('containerIoTrend', ioTotals, '#f5b740', labels, (v) => `${fmtBytes(Number(v))}`);
+      drawLine('containerCpuTrend', cpuSeries.values, '#54c7ff', cpuSeries.labels, (v) => `${Number(v).toFixed(1)}%`);
+      drawLine('containerMemTrend', memSeries.values, '#7b61ff', memSeries.labels, (v) => `${Number(v).toFixed(1)}%`);
+      drawLine('containerIoTrend', ioSeries.values, '#f5b740', ioSeries.labels, (v) => `${fmtBytes(Number(v))}`);
     }
 
     function bindRangeButtons() {

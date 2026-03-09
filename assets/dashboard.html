@@ -114,6 +114,16 @@
       return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`;
     }
 
+    function fmtMbps(bytesPerSec) {
+      const mbps = (Number(bytesPerSec || 0) * 8) / 1_000_000;
+      return `${mbps.toFixed(mbps >= 100 ? 0 : 2)} Mbps`;
+    }
+
+    function fmtTime(ts) {
+      if (!ts) return '--:--:--';
+      return new Date(ts * 1000).toLocaleTimeString('en-GB', { hour12: false });
+    }
+
     async function loadMe() {
       const res = await fetch('/api/me', { credentials: 'include' });
       if (res.status === 401) {
@@ -138,8 +148,8 @@
       document.getElementById('memS').textContent = `${fmtBytes(s.memory_used_bytes)} / ${fmtBytes(s.memory_total_bytes)}`;
       document.getElementById('diskV').textContent = `${s.disk_percent.toFixed(1)}%`;
       document.getElementById('diskS').textContent = `${fmtBytes(s.disk_used_bytes)} / ${fmtBytes(s.disk_total_bytes)}`;
-      document.getElementById('netV').textContent = `${fmtBytes(s.network_rx_bytes + s.network_tx_bytes)}/s`;
-      document.getElementById('netS').textContent = `RX ${fmtBytes(s.network_rx_bytes)}/s · TX ${fmtBytes(s.network_tx_bytes)}/s`;
+      document.getElementById('netV').textContent = fmtMbps(s.network_rx_bytes + s.network_tx_bytes);
+      document.getElementById('netS').textContent = `RX ${fmtMbps(s.network_rx_bytes)} · TX ${fmtMbps(s.network_tx_bytes)}`;
 
       const rows = document.getElementById('containerRows');
       const empty = document.getElementById('containerEmpty');
@@ -210,10 +220,17 @@
       return chart;
     }
 
-    function drawLine(canvasId, values, color) {
+    function drawLine(canvasId, values, color, labels, valueFormatter) {
       const chart = ensureLineChart(canvasId, color);
-      chart.data.labels = values.map((_, idx) => idx + 1);
+      chart.data.labels = labels;
       chart.data.datasets[0].data = values;
+      chart.options.plugins.tooltip.callbacks = {
+        title: (items) => {
+          const idx = items?.[0]?.dataIndex ?? 0;
+          return labels[idx] || '--:--:--';
+        },
+        label: (ctx) => valueFormatter ? valueFormatter(ctx.raw) : `${ctx.raw}`,
+      };
       chart.update('none');
     }
 
@@ -225,10 +242,11 @@
       }
       const data = await res.json();
       const points = data.points || [];
-      drawLine('cpuTrend', points.map(p => p.cpu_percent), '#54c7ff');
-      drawLine('memTrend', points.map(p => p.memory_percent), '#7b61ff');
-      drawLine('diskTrend', points.map(p => p.disk_percent), '#30d188');
-      drawLine('netTrend', points.map(p => p.network_total_bytes), '#f5b740');
+      const labels = points.map(p => fmtTime(p.ts));
+      drawLine('cpuTrend', points.map(p => p.cpu_percent), '#54c7ff', labels, (v) => `${Number(v).toFixed(1)}%`);
+      drawLine('memTrend', points.map(p => p.memory_percent), '#7b61ff', labels, (v) => `${Number(v).toFixed(1)}%`);
+      drawLine('diskTrend', points.map(p => p.disk_percent), '#30d188', labels, (v) => `${Number(v).toFixed(1)}%`);
+      drawLine('netTrend', points.map(p => (Number(p.network_total_bytes || 0) * 8) / 1_000_000), '#f5b740', labels, (v) => `${Number(v).toFixed(2)} Mbps`);
     }
 
     function syncContainerSelect(available, selected) {
@@ -269,10 +287,11 @@
         return (p.memory_used_bytes / p.memory_limit_bytes) * 100;
       });
       const ioTotals = points.map(p => p.network_total_bytes + p.disk_io_total_bytes);
+      const labels = points.map(p => fmtTime(p.ts));
 
-      drawLine('containerCpuTrend', points.map(p => p.cpu_percent), '#54c7ff');
-      drawLine('containerMemTrend', memoryPercents, '#7b61ff');
-      drawLine('containerIoTrend', ioTotals, '#f5b740');
+      drawLine('containerCpuTrend', points.map(p => p.cpu_percent), '#54c7ff', labels, (v) => `${Number(v).toFixed(1)}%`);
+      drawLine('containerMemTrend', memoryPercents, '#7b61ff', labels, (v) => `${Number(v).toFixed(1)}%`);
+      drawLine('containerIoTrend', ioTotals, '#f5b740', labels, (v) => `${fmtBytes(Number(v))}`);
     }
 
     function bindRangeButtons() {

@@ -37,7 +37,15 @@ const AUTH_COOKIE_NAME: &str = "osp_token";
 struct AppState {
     db: Arc<Mutex<Connection>>,
     latest: Arc<Mutex<Option<MetricsResponse>>>,
+    network_baseline: Arc<Mutex<Option<NetworkBaseline>>>,
     sample_interval_secs: u64,
+}
+
+#[derive(Clone, Copy)]
+struct NetworkBaseline {
+    ts: i64,
+    rx_total: u64,
+    tx_total: u64,
 }
 
 #[derive(Clone)]
@@ -161,6 +169,7 @@ async fn main() {
     let state = AppState {
         db: Arc::new(Mutex::new(connection)),
         latest: Arc::new(Mutex::new(None)),
+        network_baseline: Arc::new(Mutex::new(None)),
         sample_interval_secs,
     };
 
@@ -336,7 +345,7 @@ async fn api_metrics(State(state): State<AppState>) -> impl IntoResponse {
         return Json(latest);
     }
 
-    let snapshot = collect_metrics_snapshot().await;
+    let snapshot = collect_metrics_snapshot(&state).await;
     persist_snapshot(&state, &snapshot);
     *state.latest.lock().expect("latest lock") = Some(snapshot.clone());
     Json(snapshot)
@@ -512,7 +521,7 @@ fn unauth_response(path: &str) -> Response {
     Redirect::to("/login").into_response()
 }
 
-fn collect_system_metrics() -> SystemMetrics {
+fn collect_system_metrics(state: &AppState) -> SystemMetrics {
     let mut system = System::new_all();
     system.refresh_all();
 
@@ -532,12 +541,35 @@ fn collect_system_metrics() -> SystemMetrics {
         (disk_used_bytes as f32 / disk_total_bytes as f32) * 100.0
     };
 
-    let mut network_rx_bytes = 0_u64;
-    let mut network_tx_bytes = 0_u64;
+    let mut network_rx_total = 0_u64;
+    let mut network_tx_total = 0_u64;
     for (_, data) in system.networks() {
-        network_rx_bytes += data.total_received();
-        network_tx_bytes += data.total_transmitted();
+        network_rx_total += data.total_received();
+        network_tx_total += data.total_transmitted();
     }
+
+    let now = now_ts();
+    let (network_rx_bytes, network_tx_bytes) = {
+        let mut baseline = state.network_baseline.lock().expect("network baseline lock");
+        let mut rx_bps = 0_u64;
+        let mut tx_bps = 0_u64;
+
+        if let Some(prev) = *baseline {
+            let delta_t = (now - prev.ts).max(1) as u64;
+            let delta_rx = network_rx_total.saturating_sub(prev.rx_total);
+            let delta_tx = network_tx_total.saturating_sub(prev.tx_total);
+            rx_bps = delta_rx / delta_t;
+            tx_bps = delta_tx / delta_t;
+        }
+
+        *baseline = Some(NetworkBaseline {
+            ts: now,
+            rx_total: network_rx_total,
+            tx_total: network_tx_total,
+        });
+
+        (rx_bps, tx_bps)
+    };
 
     let load = system.load_average();
     SystemMetrics {
@@ -571,12 +603,29 @@ fn normalize_memory_to_bytes(value: u64) -> u64 {
 fn select_disk_usage(system: &System) -> (u64, u64) {
     #[cfg(target_os = "macos")]
     {
+        if let Some(data_disk) = system
+            .disks()
+            .iter()
+            .find(|disk| disk.mount_point() == Path::new("/System/Volumes/Data"))
+        {
+            return (data_disk.total_space(), data_disk.available_space());
+        }
+
         if let Some(root_disk) = system
             .disks()
             .iter()
             .find(|disk| disk.mount_point() == Path::new("/"))
         {
             return (root_disk.total_space(), root_disk.available_space());
+        }
+
+        if let Some(primary_disk) = system
+            .disks()
+            .iter()
+            .filter(|disk| !disk.is_removable())
+            .max_by_key(|disk| disk.total_space())
+        {
+            return (primary_disk.total_space(), primary_disk.available_space());
         }
     }
 
@@ -589,8 +638,8 @@ fn select_disk_usage(system: &System) -> (u64, u64) {
     (disk_total_bytes, disk_available_bytes)
 }
 
-async fn collect_metrics_snapshot() -> MetricsResponse {
-    let system = collect_system_metrics();
+async fn collect_metrics_snapshot(state: &AppState) -> MetricsResponse {
+    let system = collect_system_metrics(state);
     let containers = collect_container_metrics().await;
     MetricsResponse {
         system,
@@ -652,7 +701,7 @@ fn persist_snapshot(state: &AppState, snapshot: &MetricsResponse) {
 
 async fn background_sampler(state: AppState) {
     loop {
-        let snapshot = collect_metrics_snapshot().await;
+        let snapshot = collect_metrics_snapshot(&state).await;
         persist_snapshot(&state, &snapshot);
         *state.latest.lock().expect("latest lock") = Some(snapshot);
 

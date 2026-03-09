@@ -23,7 +23,7 @@
       <article class="card metric"><h3>CPU Usage</h3><div class="v" id="cpuV">--</div><div class="s" id="cpuS">--</div></article>
       <article class="card metric"><h3>Memory Usage</h3><div class="v" id="memV">--</div><div class="s" id="memS">--</div></article>
       <article class="card metric"><h3>Disk Usage</h3><div class="v" id="diskV">--</div><div class="s" id="diskS">--</div></article>
-      <article class="card metric"><h3>Network Total</h3><div class="v" id="netV">--</div><div class="s" id="netS">--</div></article>
+      <article class="card metric"><h3>Network Throughput</h3><div class="v" id="netV">--</div><div class="s" id="netS">--</div></article>
     </section>
 
     <section class="card section">
@@ -132,8 +132,8 @@
       document.getElementById('memS').textContent = `${fmtBytes(s.memory_used_bytes)} / ${fmtBytes(s.memory_total_bytes)}`;
       document.getElementById('diskV').textContent = `${s.disk_percent.toFixed(1)}%`;
       document.getElementById('diskS').textContent = `${fmtBytes(s.disk_used_bytes)} / ${fmtBytes(s.disk_total_bytes)}`;
-      document.getElementById('netV').textContent = `${fmtBytes(s.network_rx_bytes + s.network_tx_bytes)}`;
-      document.getElementById('netS').textContent = `RX ${fmtBytes(s.network_rx_bytes)} · TX ${fmtBytes(s.network_tx_bytes)}`;
+      document.getElementById('netV').textContent = `${fmtBytes(s.network_rx_bytes + s.network_tx_bytes)}/s`;
+      document.getElementById('netS').textContent = `RX ${fmtBytes(s.network_rx_bytes)}/s · TX ${fmtBytes(s.network_tx_bytes)}/s`;
 
       const rows = document.getElementById('containerRows');
       const empty = document.getElementById('containerEmpty');
